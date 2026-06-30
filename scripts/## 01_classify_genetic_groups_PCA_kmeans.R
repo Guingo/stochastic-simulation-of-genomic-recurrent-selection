@@ -1,0 +1,179 @@
+# ============================================================
+# 01_classify_genetic_groups_PCA_kmeans.R
+#
+# Purpose:
+# Classify maize inbred lines into two operational genetic
+# groups using SNP-derived PCA followed by k-means clustering.
+#
+# This script defines the genetic groups that will be used as:
+# - one recurrent selection group;
+# - one opposite group used as source of testers.
+#
+# Inputs:
+# - sim_inputs_real.rds
+#
+# Outputs:
+# - grupos_linhagens_A_B.rds
+# - grupos_linhagens_A_B.csv
+# - pca_grupos_linhagens_A_B.rds
+# - pca_grupos_linhagens_A_B.csv
+# - PCA_grupos_geneticos_A_B.png
+# - PCA_grupos_geneticos_A_B.pdf
+# ============================================================
+
+rm(list = ls())
+
+library(dplyr)
+library(ggplot2)
+
+set.seed(123)
+
+# ------------------------------------------------------------
+# 1. Load real genomic inputs
+# ------------------------------------------------------------
+
+sim_inputs_real <- readRDS("sim_inputs_real.rds")
+
+geno <- as.matrix(sim_inputs_real$geno)
+
+# ------------------------------------------------------------
+# 2. Remove markers with zero or undefined variance
+# ------------------------------------------------------------
+
+var_snp <- apply(
+  geno,
+  2,
+  var,
+  na.rm = TRUE
+)
+
+snps_validos <- names(var_snp)[
+  !is.na(var_snp) & var_snp > 0
+]
+
+geno_pca <- geno[, snps_validos, drop = FALSE]
+
+# ------------------------------------------------------------
+# 3. Standardize SNP marker matrix
+# ------------------------------------------------------------
+
+geno_scaled <- scale(
+  geno_pca,
+  center = TRUE,
+  scale = TRUE
+)
+
+# Remove any columns with non-finite values after scaling
+col_ok <- apply(
+  geno_scaled,
+  2,
+  function(x) all(is.finite(x))
+)
+
+geno_scaled <- geno_scaled[, col_ok, drop = FALSE]
+
+# ------------------------------------------------------------
+# 4. Principal component analysis
+# ------------------------------------------------------------
+
+pca_geno <- prcomp(
+  geno_scaled,
+  center = FALSE,
+  scale. = FALSE
+)
+
+var_exp <- summary(pca_geno)$importance[2, 1:5] * 100
+
+cat("\nVariance explained by the first five PCs (%):\n")
+print(round(var_exp, 2))
+
+pca_df <- data.frame(
+  Linhagem = rownames(geno),
+  PC1 = pca_geno$x[, 1],
+  PC2 = pca_geno$x[, 2],
+  PC3 = pca_geno$x[, 3],
+  PC4 = pca_geno$x[, 4],
+  PC5 = pca_geno$x[, 5],
+  stringsAsFactors = FALSE
+)
+
+# ------------------------------------------------------------
+# 5. Classify lines into two genetic groups using k-means
+# ------------------------------------------------------------
+
+km <- kmeans(
+  pca_df[, c("PC1", "PC2")],
+  centers = 2,
+  nstart = 50
+)
+
+pca_df$Cluster_kmeans <- km$cluster
+
+pca_df$Grupo <- paste0("Grupo_", km$cluster)
+
+pca_df$Grupo <- dplyr::recode(
+  pca_df$Grupo,
+  "Grupo_1" = "A",
+  "Grupo_2" = "B"
+)
+
+grupos_linhagens <- pca_df %>%
+  dplyr::select(
+    Linhagem,
+    Grupo
+  )
+
+cat("\nNumber of lines per genetic group:\n")
+print(table(grupos_linhagens$Grupo))
+
+# ------------------------------------------------------------
+# 6. Calculate group centroids in PCA space
+# ------------------------------------------------------------
+
+centroides_grupos <- pca_df %>%
+  dplyr::group_by(Grupo) %>%
+  dplyr::summarise(
+    PC1_centroid = mean(PC1),
+    PC2_centroid = mean(PC2),
+    n_linhas = dplyr::n(),
+    .groups = "drop"
+  )
+
+cat("\nGroup centroids in PCA space:\n")
+print(centroides_grupos)
+
+# ------------------------------------------------------------
+# 7. PCA plot with genetic groups
+# ------------------------------------------------------------
+
+plot_grupos <- ggplot(
+  pca_df,
+  aes(x = PC1, y = PC2, color = Grupo)
+) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_point(
+    data = centroides_grupos,
+    aes(x = PC1_centroid, y = PC2_centroid, color = Grupo),
+    size = 5,
+    shape = 4,
+    stroke = 1.4,
+    inherit.aes = FALSE
+  ) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = paste0("PC1 (", round(var_exp[1], 2), "%)"),
+    y = paste0("PC2 (", round(var_exp[2], 2), "%)"),
+    color = "Genetic group"
+  )
+
+print(plot_grupos)
+
+# ------------------------------------------------------------
+# 8. Save outputs
+# ------------------------------------------------------------
+
+saveRDS(grupos_linhagens,"grupos_linhagens_A_B.rds")
+saveRDS(pca_df,"pca_grupos_linhagens_A_B.rds")
+ggsave(filename = "PCA_grupos_geneticos_A_B.png",plot = plot_grupos,width = 7.5,height = 5.5,dpi = 300)
+ggsave(filename = "PCA_grupos_geneticos_A_B.pdf",plot = plot_grupos,width = 7.5,height = 5.5)
+
