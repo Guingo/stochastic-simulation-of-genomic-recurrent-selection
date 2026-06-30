@@ -190,4 +190,14 @@ cat("\nAlignment DH genotypes x marker effects:\n")
 print(all(colnames(geno_DH2) == rownames(MarkEff_DH)))
 
 gv_DH <- geno_DH2 %*% MarkEff_DH
+# ------------------------------------------------------------
+# 9. Save validation objects
+# ------------------------------------------------------------
+
+saveRDS( founderPop,"A00_founderPop_validation.rds")
+saveRDS(pop_base,"A00_pop_base_validation.rds")
+saveRDS(geno_base_alpha,"A00_geno_base_alpha_validation.rds")
+saveRDS(DH_pop,"A00_DH_pop_validation.rds")
+saveRDS(geno_DH,"A00_geno_DH_validation.rds")
+saveRDS(gv_DH,"A00_gv_DH_validation.rds")
 
