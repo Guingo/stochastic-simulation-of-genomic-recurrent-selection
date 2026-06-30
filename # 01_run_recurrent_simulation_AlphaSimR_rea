@@ -1,0 +1,689 @@
+# ============================================================
+# Inputs:
+# - sim_inputs_real.rds
+# - cruzamentos_programa_B_top50_por_cenario.rds
+# - testadores_grupo_A.rds
+#
+# Outputs:
+# - AlphaSimR_cycle_summary_recorrente.rds/csv
+# - AlphaSimR_elites_recorrente.rds/csv
+# - AlphaSimR_TC_selected_recorrente.rds/csv
+# - AlphaSimR_crosses_used_recorrente.rds/csv
+# ============================================================
+
+rm(list = ls())
+
+library(dplyr)
+library(AlphaSimR)
+
+set.seed(123)
+
+# ============================================================
+# 1. Simulation parameters
+# ============================================================
+
+n_cycles <- 6
+
+cenarios <- c("AP", "AE", "FF", "FM", "MT", "Culling")
+
+n_crosses <- 50
+n_DH_por_cruzamento <- 20
+
+n_TC1 <- 800
+n_TC2 <- 200
+n_TC3 <- 100
+
+n_elite <- 2
+
+h2_traits <- c(
+  AP = 0.90,
+  AE = 0.91,
+  FF = 0.89,
+  FM = 0.89
+)
+
+h2_stage_factor <- c(
+  TC1 = 0.60,
+  TC2 = 0.80,
+  TC3 = 0.95
+)
+
+# ============================================================
+# 2. Load inputs
+# ============================================================
+
+sim_inputs_real <- readRDS("sim_inputs_real.rds")
+
+geno <- as.matrix(sim_inputs_real$geno)
+mapa <- sim_inputs_real$mapa
+MarkEff <- sim_inputs_real$MarkEff
+
+cruzamentos_B_top50 <- readRDS("cruzamentos_programa_B_top50_por_cenario.rds")
+testadores_A <- readRDS("testadores_grupo_A.rds")
+
+cat("\nReal genotype matrix dimension:\n")
+print(dim(geno))
+
+cat("\nObserved genotype classes:\n")
+print(table(geno, useNA = "ifany"))
+
+# ============================================================
+# 3. Align genotype, map and marker effects
+# ============================================================
+
+mapa <- mapa %>%
+  dplyr::arrange(chr, gen_pos_M)
+
+geno <- geno[, mapa$marker, drop = FALSE]
+MarkEff <- MarkEff[mapa$marker, , drop = FALSE]
+
+cat("\nAlignment geno x map:\n")
+print(all(colnames(geno) == mapa$marker))
+
+cat("\nAlignment geno x marker effects:\n")
+print(all(colnames(geno) == rownames(MarkEff)))
+
+cat("\nSNPs per chromosome:\n")
+print(table(mapa$chr))
+
+# ============================================================
+# 4. Import real genotypes into AlphaSimR
+# ============================================================
+
+gen_map <- data.frame(
+  marker = mapa$marker,
+  chr = mapa$chr,
+  pos = mapa$gen_pos_M
+)
+
+cat("\nImporting real genotypes into AlphaSimR...\n")
+
+founderPop <- importInbredGeno(
+  geno = geno,
+  genMap = gen_map
+)
+
+cat("\nFounderPop:\n")
+print(founderPop)
+
+SP <- SimParam$new(founderPop)
+
+SP$addSnpChipByName(
+  markers = mapa$marker
+)
+
+SP$setTrackPed(TRUE)
+
+pop_base <- newPop(
+  rawPop = founderPop,
+  simParam = SP
+)
+
+pop_base@id <- rownames(geno)
+
+cat("\nBase population in AlphaSimR:\n")
+print(pop_base)
+
+geno_base_alpha <- pullSnpGeno(
+  pop = pop_base,
+  snpChip = 1,
+  simParam = SP
+)
+
+cat("\nExtracted genotype matrix from AlphaSimR base population:\n")
+print(dim(geno_base_alpha))
+print(table(geno_base_alpha, useNA = "ifany"))
+
+cat("\nAlignment extracted genotypes x marker effects:\n")
+print(all(colnames(geno_base_alpha) == rownames(MarkEff)))
+
+rm(geno_base_alpha)
+gc()
+
+# ============================================================
+# 5. Auxiliary functions
+# ============================================================
+
+get_h2_stage <- function(scenario, stage) {
+  
+  if (scenario %in% names(h2_traits)) {
+    h2_base <- h2_traits[scenario]
+  } else {
+    h2_base <- mean(h2_traits)
+  }
+  
+  h2_final <- h2_base * h2_stage_factor[stage]
+  
+  return(as.numeric(h2_final))
+}
+
+get_score <- function(df, scenario) {
+  
+  if (scenario %in% c("AP", "AE", "FF", "FM")) {
+    score <- df[[scenario]]
+  } else {
+    score <- rowMeans(
+      df[, c("AP", "AE", "FF", "FM"), drop = FALSE],
+      na.rm = TRUE
+    )
+  }
+  
+  return(score)
+}
+
+add_field_error <- function(gv, h2) {
+  
+  vg <- var(gv, na.rm = TRUE)
+  
+  if (is.na(vg) || vg <= 0) {
+    ve <- 1
+  } else {
+    ve <- vg * (1 - h2) / h2
+  }
+  
+  pheno <- gv + rnorm(length(gv), mean = 0, sd = sqrt(ve))
+  
+  return(pheno)
+}
+
+make_cross_candidates_base_elite <- function(base_parentals, elite_parentals) {
+  
+  candidates <- expand.grid(
+    Parent1 = base_parentals,
+    Parent2 = elite_parentals,
+    stringsAsFactors = FALSE
+  )
+  
+  candidates <- candidates %>%
+    dplyr::filter(Parent1 != Parent2) %>%
+    dplyr::mutate(
+      cross_id = paste(Parent1, Parent2, sep = "_")
+    )
+  
+  return(candidates)
+}
+
+score_and_select_crosses <- function(
+    candidates,
+    geno_pool_matrix,
+    MarkEff,
+    scenario,
+    n_crosses = 50
+) {
+  
+  parent_ids <- unique(c(candidates$Parent1, candidates$Parent2))
+  
+  geno_parents <- geno_pool_matrix[parent_ids, , drop = FALSE]
+  
+  gv_parents <- geno_parents %*% MarkEff
+  gv_parents <- as.data.frame(gv_parents)
+  gv_parents$Linhagem <- rownames(geno_parents)
+  
+  candidates2 <- candidates %>%
+    dplyr::left_join(
+      gv_parents %>%
+        dplyr::rename(
+          Parent1 = Linhagem,
+          AP_P1 = AP,
+          AE_P1 = AE,
+          FF_P1 = FF,
+          FM_P1 = FM
+        ),
+      by = "Parent1"
+    ) %>%
+    dplyr::left_join(
+      gv_parents %>%
+        dplyr::rename(
+          Parent2 = Linhagem,
+          AP_P2 = AP,
+          AE_P2 = AE,
+          FF_P2 = FF,
+          FM_P2 = FM
+        ),
+      by = "Parent2"
+    ) %>%
+    dplyr::mutate(
+      AP = (AP_P1 + AP_P2) / 2,
+      AE = (AE_P1 + AE_P2) / 2,
+      FF = (FF_P1 + FF_P2) / 2,
+      FM = (FM_P1 + FM_P2) / 2
+    )
+  
+  if (scenario == "Culling") {
+    
+    candidates_culling <- candidates2 %>%
+      dplyr::filter(
+        AP >= stats::quantile(AP, 0.50, na.rm = TRUE),
+        AE >= stats::quantile(AE, 0.50, na.rm = TRUE),
+        FF >= stats::quantile(FF, 0.50, na.rm = TRUE),
+        FM >= stats::quantile(FM, 0.50, na.rm = TRUE)
+      )
+    
+    if (nrow(candidates_culling) >= n_crosses) {
+      candidates2 <- candidates_culling
+    }
+  }
+  
+  candidates2$score <- get_score(candidates2, scenario)
+  
+  selected_crosses <- candidates2 %>%
+    dplyr::arrange(dplyr::desc(score)) %>%
+    dplyr::slice_head(n = n_crosses) %>%
+    dplyr::select(Parent1, Parent2, cross_id, score)
+  
+  return(selected_crosses)
+}
+
+simulate_DHs_AlphaSimR <- function(
+    pop_current,
+    plan,
+    scenario,
+    cycle,
+    n_DH_por_cruzamento,
+    SP
+) {
+  
+  cross_plan <- as.matrix(
+    plan %>%
+      dplyr::select(Parent1, Parent2)
+  )
+  
+  parent_ids <- unique(as.vector(cross_plan))
+  
+  if (!all(parent_ids %in% pop_current@id)) {
+    
+    missing_ids <- parent_ids[!(parent_ids %in% pop_current@id)]
+    
+    stop(
+      paste(
+        "Parents not found in pop_current:",
+        paste(missing_ids, collapse = ", ")
+      )
+    )
+  }
+  
+  F1_pop <- makeCross(
+    pop = pop_current,
+    crossPlan = cross_plan,
+    nProgeny = 1,
+    simParam = SP
+  )
+  
+  DH_pop <- makeDH(
+    pop = F1_pop,
+    nDH = n_DH_por_cruzamento,
+    simParam = SP
+  )
+  
+  geno_DH <- pullSnpGeno(
+    pop = DH_pop,
+    snpChip = 1,
+    simParam = SP
+  )
+  
+  DH_ids <- character(0)
+  
+  for (i in seq_len(nrow(plan))) {
+    
+    ids_i <- paste(
+      scenario,
+      paste0("C", cycle),
+      plan$cross_id[i],
+      paste0("DH", seq_len(n_DH_por_cruzamento)),
+      sep = "_"
+    )
+    
+    DH_ids <- c(DH_ids, ids_i)
+  }
+  
+  rownames(geno_DH) <- DH_ids
+  DH_pop@id <- DH_ids
+  
+  DH_info <- data.frame(
+    scenario = rep(scenario, nrow(geno_DH)),
+    cycle = rep(cycle, nrow(geno_DH)),
+    cross_id = rep(plan$cross_id, each = n_DH_por_cruzamento),
+    Parent1 = rep(plan$Parent1, each = n_DH_por_cruzamento),
+    Parent2 = rep(plan$Parent2, each = n_DH_por_cruzamento),
+    DH_ID = rownames(geno_DH),
+    stringsAsFactors = FALSE
+  )
+  
+  return(
+    list(
+      DH_pop = DH_pop,
+      DH_geno = geno_DH,
+      DH_info = DH_info
+    )
+  )
+}
+
+evaluate_testcross_stage <- function(
+    DH_geno,
+    DH_info,
+    tester_id,
+    geno_pool_matrix,
+    MarkEff,
+    scenario,
+    h2,
+    stage_name,
+    n_select
+) {
+  
+  tester_geno <- geno_pool_matrix[tester_id, , drop = TRUE]
+  
+  hybrid_geno <- sweep(
+    DH_geno,
+    2,
+    tester_geno,
+    FUN = "+"
+  ) / 2
+  
+  gv_hybrid <- hybrid_geno %*% MarkEff
+  gv_hybrid <- as.data.frame(gv_hybrid)
+  
+  genetic_score <- get_score(gv_hybrid, scenario)
+  
+  phenotype_score <- add_field_error(
+    gv = genetic_score,
+    h2 = h2
+  )
+  
+  out <- DH_info %>%
+    dplyr::mutate(
+      tester = tester_id,
+      stage = stage_name,
+      AP = gv_hybrid$AP,
+      AE = gv_hybrid$AE,
+      FF = gv_hybrid$FF,
+      FM = gv_hybrid$FM,
+      genetic_score = genetic_score,
+      phenotype_score = phenotype_score
+    )
+  
+  selected_info <- out %>%
+    dplyr::arrange(dplyr::desc(phenotype_score)) %>%
+    dplyr::slice_head(n = n_select)
+  
+  selected_geno <- DH_geno[
+    selected_info$DH_ID,
+    ,
+    drop = FALSE
+  ]
+  
+  return(
+    list(
+      selected_info = selected_info,
+      selected_geno = selected_geno,
+      all_info = out
+    )
+  )
+}
+
+# ============================================================
+# 6. Prepare testers
+# ============================================================
+
+testers <- testadores_A$Linhagem
+
+if (length(testers) < 3) {
+  stop("Less than three testers are available.")
+}
+
+tester1 <- testers[1]
+tester2 <- testers[2]
+tester3 <- testers[3]
+
+cat("\nTesters used:\n")
+print(c(tester1 = tester1, tester2 = tester2, tester3 = tester3))
+
+if (!all(testers[1:3] %in% rownames(geno))) {
+  stop("At least one tester is not present in the genotype matrix.")
+}
+
+# ============================================================
+# 7. Storage objects
+# ============================================================
+
+all_cycle_summary <- list()
+all_elites <- list()
+all_TC_summary <- list()
+all_crosses_used <- list()
+
+# ============================================================
+# 8. Main recurrent simulation loop
+# ============================================================
+
+for (sc in cenarios) {
+  
+  cat("\n###################################################\n")
+  cat("SCENARIO:", sc, "\n")
+  cat("###################################################\n")
+  
+  pop_current <- pop_base
+  geno_pool_matrix <- geno
+  
+  plan_initial <- cruzamentos_B_top50 %>%
+    dplyr::filter(scenario == sc) %>%
+    dplyr::arrange(dplyr::desc(Y)) %>%
+    dplyr::slice_head(n = n_crosses) %>%
+    dplyr::mutate(score = Y) %>%
+    dplyr::select(Parent1, Parent2, cross_id, score)
+  
+  if (nrow(plan_initial) == 0) {
+    stop(paste("No initial crosses found for scenario", sc))
+  }
+  
+  base_parentals <- unique(c(plan_initial$Parent1, plan_initial$Parent2))
+  elite_accumulated <- character(0)
+  
+  cat("\nNumber of base parents in scenario", sc, ":\n")
+  print(length(base_parentals))
+  
+  for (cycle in seq_len(n_cycles)) {
+    
+    cat("\n-----------------------------------------\n")
+    cat("Cycle", cycle, "- Scenario", sc, "\n")
+    cat("-----------------------------------------\n")
+    
+    if (cycle == 1) {
+      
+      plan_cycle <- plan_initial
+      
+    } else {
+      
+      candidates <- make_cross_candidates_base_elite(
+        base_parentals = base_parentals,
+        elite_parentals = elite_accumulated
+      )
+      
+      cat("Number of candidate crosses:", nrow(candidates), "\n")
+      
+      plan_cycle <- score_and_select_crosses(
+        candidates = candidates,
+        geno_pool_matrix = geno_pool_matrix,
+        MarkEff = MarkEff,
+        scenario = sc,
+        n_crosses = n_crosses
+      )
+    }
+    
+    cat("Number of crosses used in the cycle:", nrow(plan_cycle), "\n")
+    
+    all_crosses_used[[paste(sc, cycle, sep = "_C")]] <- plan_cycle %>%
+      dplyr::mutate(
+        scenario = sc,
+        cycle = cycle
+      )
+    
+    DH_obj <- simulate_DHs_AlphaSimR(
+      pop_current = pop_current,
+      plan = plan_cycle,
+      scenario = sc,
+      cycle = cycle,
+      n_DH_por_cruzamento = n_DH_por_cruzamento,
+      SP = SP
+    )
+    
+    DH_geno <- DH_obj$DH_geno
+    DH_info <- DH_obj$DH_info
+    
+    cat("Number of DHs generated:", nrow(DH_geno), "\n")
+    
+    TC1 <- evaluate_testcross_stage(
+      DH_geno = DH_geno,
+      DH_info = DH_info,
+      tester_id = tester1,
+      geno_pool_matrix = geno_pool_matrix,
+      MarkEff = MarkEff,
+      scenario = sc,
+      h2 = get_h2_stage(sc, "TC1"),
+      stage_name = "TC1",
+      n_select = n_TC1
+    )
+    
+    TC2 <- evaluate_testcross_stage(
+      DH_geno = TC1$selected_geno,
+      DH_info = TC1$selected_info %>%
+        dplyr::select(scenario, cycle, cross_id, Parent1, Parent2, DH_ID),
+      tester_id = tester2,
+      geno_pool_matrix = geno_pool_matrix,
+      MarkEff = MarkEff,
+      scenario = sc,
+      h2 = get_h2_stage(sc, "TC2"),
+      stage_name = "TC2",
+      n_select = n_TC2
+    )
+    
+    TC3 <- evaluate_testcross_stage(
+      DH_geno = TC2$selected_geno,
+      DH_info = TC2$selected_info %>%
+        dplyr::select(scenario, cycle, cross_id, Parent1, Parent2, DH_ID),
+      tester_id = tester3,
+      geno_pool_matrix = geno_pool_matrix,
+      MarkEff = MarkEff,
+      scenario = sc,
+      h2 = get_h2_stage(sc, "TC3"),
+      stage_name = "TC3",
+      n_select = n_TC3
+    )
+    
+    elite_cycle <- TC3$selected_info %>%
+      dplyr::arrange(dplyr::desc(phenotype_score)) %>%
+      dplyr::slice_head(n = n_elite) %>%
+      dplyr::mutate(
+        Elite_short_ID = paste0(sc, "_C", cycle, "_E", dplyr::row_number()),
+        DH_ID_original = DH_ID
+      )
+    
+    elite_ids_original <- elite_cycle$DH_ID_original
+    elite_ids_short <- elite_cycle$Elite_short_ID
+    
+    cat("Selected elites in the cycle:\n")
+    print(elite_ids_short)
+    
+    geno_elites <- TC3$selected_geno[
+      elite_ids_original,
+      ,
+      drop = FALSE
+    ]
+    
+    rownames(geno_elites) <- elite_ids_short
+    
+    new_elites <- elite_ids_short[
+      !(elite_ids_short %in% rownames(geno_pool_matrix))
+    ]
+    
+    if (length(new_elites) > 0) {
+      
+      geno_pool_matrix <- rbind(
+        geno_pool_matrix,
+        geno_elites[new_elites, , drop = FALSE]
+      )
+    }
+    
+    elite_accumulated <- unique(c(elite_accumulated, elite_ids_short))
+    
+    elite_index <- match(elite_ids_original, DH_obj$DH_pop@id)
+    
+    if (any(is.na(elite_index))) {
+      stop("At least one elite was not found in DH_pop.")
+    }
+    
+    elite_pop <- DH_obj$DH_pop[elite_index]
+    elite_pop@id <- elite_ids_short
+    
+    pop_current <- c(pop_current, elite_pop)
+    
+    cat("Number of individuals in pop_current:", nInd(pop_current), "\n")
+    
+    TC_summary_cycle <- data.frame(
+      scenario = sc,
+      cycle = cycle,
+      n_parentais_base = length(base_parentals),
+      n_elites_acumuladas = length(elite_accumulated),
+      n_parentais_pool = length(base_parentals) + length(elite_accumulated),
+      n_individuos_AlphaSimR = nInd(pop_current),
+      n_crosses = nrow(plan_cycle),
+      n_DH = nrow(DH_geno),
+      n_TC1 = nrow(TC1$selected_info),
+      n_TC2 = nrow(TC2$selected_info),
+      n_TC3 = nrow(TC3$selected_info),
+      h2_TC1 = get_h2_stage(sc, "TC1"),
+      h2_TC2 = get_h2_stage(sc, "TC2"),
+      h2_TC3 = get_h2_stage(sc, "TC3"),
+      mean_TC1 = mean(TC1$selected_info$phenotype_score),
+      mean_TC2 = mean(TC2$selected_info$phenotype_score),
+      mean_TC3 = mean(TC3$selected_info$phenotype_score),
+      mean_elite = mean(elite_cycle$phenotype_score),
+      mean_genetic_elite = mean(elite_cycle$genetic_score),
+      var_genetic_TC3 = var(TC3$selected_info$genetic_score),
+      stringsAsFactors = FALSE
+    )
+    
+    all_cycle_summary[[paste(sc, cycle, sep = "_C")]] <- TC_summary_cycle
+    
+    all_elites[[paste(sc, cycle, sep = "_C")]] <- elite_cycle
+    
+    all_TC_summary[[paste(sc, cycle, sep = "_C")]] <- dplyr::bind_rows(
+      TC1$selected_info %>% dplyr::mutate(selection_step = "Selected_TC1"),
+      TC2$selected_info %>% dplyr::mutate(selection_step = "Selected_TC2"),
+      TC3$selected_info %>% dplyr::mutate(selection_step = "Selected_TC3")
+    )
+    
+    cat("Cycle summary:\n")
+    print(TC_summary_cycle)
+    
+    rm(DH_obj, DH_geno, DH_info, TC1, TC2, TC3, geno_elites, elite_pop)
+    gc()
+  }
+}
+
+# ============================================================
+# 9. Consolidate and save outputs
+# ============================================================
+
+cycle_summary_all <- dplyr::bind_rows(all_cycle_summary)
+elites_all <- dplyr::bind_rows(all_elites)
+TC_selected_all <- dplyr::bind_rows(all_TC_summary)
+crosses_used_all <- dplyr::bind_rows(all_crosses_used)
+
+saveRDS(cycle_summary_all, "AlphaSimR_cycle_summary_recorrente.rds")
+saveRDS(elites_all, "AlphaSimR_elites_recorrente.rds")
+saveRDS(TC_selected_all, "AlphaSimR_TC_selected_recorrente.rds")
+saveRDS(crosses_used_all, "AlphaSimR_crosses_used_recorrente.rds")
+
+write.csv(cycle_summary_all, "AlphaSimR_cycle_summary_recorrente.csv", row.names = FALSE)
+write.csv(elites_all, "AlphaSimR_elites_recorrente.csv", row.names = FALSE)
+write.csv(TC_selected_all, "AlphaSimR_TC_selected_recorrente.csv", row.names = FALSE)
+write.csv(crosses_used_all, "AlphaSimR_crosses_used_recorrente.csv", row.names = FALSE)
+
+cat("\n============================================================\n")
+cat("ALPHASIMR RECURRENT SIMULATION COMPLETED SUCCESSFULLY\n")
+cat("============================================================\n")
+
+cat("\nFiles saved:\n")
+cat("- AlphaSimR_cycle_summary_recorrente.rds/csv\n")
+cat("- AlphaSimR_elites_recorrente.rds/csv\n")
+cat("- AlphaSimR_TC_selected_recorrente.rds/csv\n")
+cat("- AlphaSimR_crosses_used_recorrente.rds/csv\n")
