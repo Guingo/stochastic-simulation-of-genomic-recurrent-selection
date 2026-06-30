@@ -1,0 +1,193 @@
+# ============================================================
+# Outputs:
+# - A00_founderPop_validation.rds
+# - A00_pop_base_validation.rds
+# - A00_geno_DH_validation.rds
+# - A00_gv_DH_validation.rds
+# ============================================================
+
+rm(list = ls())
+
+library(dplyr)
+library(AlphaSimR)
+
+set.seed(123)
+
+# ------------------------------------------------------------
+# 1. Load real genomic inputs
+# ------------------------------------------------------------
+
+sim_inputs_real <- readRDS("sim_inputs_real.rds")
+
+geno <- as.matrix(sim_inputs_real$geno)
+mapa <- sim_inputs_real$mapa
+MarkEff <- sim_inputs_real$MarkEff
+
+mapa <- mapa %>%
+  dplyr::arrange(chr, gen_pos_M)
+
+geno <- geno[, mapa$marker, drop = FALSE]
+MarkEff <- MarkEff[mapa$marker, , drop = FALSE]
+
+cat("\nGenotype matrix dimension:\n")
+print(dim(geno))
+
+cat("\nGenotype classes:\n")
+print(table(geno, useNA = "ifany"))
+
+cat("\nAlignment geno x map:\n")
+print(all(colnames(geno) == mapa$marker))
+
+cat("\nAlignment geno x marker effects:\n")
+print(all(colnames(geno) == rownames(MarkEff)))
+
+cat("\nSNPs per chromosome:\n")
+print(table(mapa$chr))
+
+# ------------------------------------------------------------
+# 2. Pilot subset across 10 chromosomes
+# ------------------------------------------------------------
+
+n_linhas_piloto <- 100
+n_snp_por_chr <- 200
+
+linhas_piloto <- rownames(geno)[1:n_linhas_piloto]
+
+mapa_piloto <- mapa %>%
+  dplyr::group_by(chr) %>%
+  dplyr::slice_sample(n = n_snp_por_chr) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(chr, gen_pos_M)
+
+snps_piloto <- mapa_piloto$marker
+
+geno_piloto <- geno[linhas_piloto, snps_piloto, drop = FALSE]
+MarkEff_piloto <- MarkEff[snps_piloto, , drop = FALSE]
+
+cat("\nPilot genotype dimension:\n")
+print(dim(geno_piloto))
+
+cat("\nSNPs per chromosome in pilot:\n")
+print(table(mapa_piloto$chr))
+
+cat("\nPilot genotype classes:\n")
+print(table(geno_piloto, useNA = "ifany"))
+
+# ------------------------------------------------------------
+# 3. Prepare genetic map for AlphaSimR
+# ------------------------------------------------------------
+
+gen_map_piloto <- data.frame(
+  marker = mapa_piloto$marker,
+  chr = mapa_piloto$chr,
+  pos = mapa_piloto$gen_pos_M
+)
+
+# ------------------------------------------------------------
+# 4. Import real inbred genotypes into AlphaSimR
+# ------------------------------------------------------------
+
+founderPop <- importInbredGeno(
+  geno = geno_piloto,
+  genMap = gen_map_piloto
+)
+
+cat("\nFounder population:\n")
+print(founderPop)
+
+SP <- SimParam$new(founderPop)
+
+SP$addSnpChipByName(
+  markers = mapa_piloto$marker
+)
+
+SP$setTrackPed(TRUE)
+
+pop_base <- newPop(
+  rawPop = founderPop,
+  simParam = SP
+)
+
+pop_base@id <- linhas_piloto
+
+cat("\nBase population:\n")
+print(pop_base)
+
+# ------------------------------------------------------------
+# 5. Check extracted genotypes
+# ------------------------------------------------------------
+
+geno_base_alpha <- pullSnpGeno(
+  pop = pop_base,
+  snpChip = 1,
+  simParam = SP
+)
+
+cat("\nExtracted base population genotypes:\n")
+print(dim(geno_base_alpha))
+print(table(geno_base_alpha, useNA = "ifany"))
+
+# ------------------------------------------------------------
+# 6. Make pilot crosses and DHs
+# ------------------------------------------------------------
+
+row_sums <- rowSums(geno_piloto)
+
+linhagem_baixa <- names(which.min(row_sums))
+linhagem_alta <- names(which.max(row_sums))
+
+cross_plan <- matrix(
+  c(
+    linhagem_baixa, linhagem_alta,
+    linhas_piloto[10], linhas_piloto[20],
+    linhas_piloto[30], linhas_piloto[40]
+  ),
+  ncol = 2,
+  byrow = TRUE
+)
+
+cat("\nPilot cross plan:\n")
+print(cross_plan)
+
+F1_pop <- makeCross(
+  pop = pop_base,
+  crossPlan = cross_plan,
+  nProgeny = 1,
+  simParam = SP
+)
+
+DH_pop <- makeDH(
+  pop = F1_pop,
+  nDH = 20,
+  simParam = SP
+)
+
+geno_DH <- pullSnpGeno(
+  pop = DH_pop,
+  snpChip = 1,
+  simParam = SP
+)
+
+cat("\nDH genotype dimension:\n")
+print(dim(geno_DH))
+
+cat("\nDH genotype classes:\n")
+print(table(geno_DH, useNA = "ifany"))
+
+# ------------------------------------------------------------
+# 7. Calculate genomic values using real BayesB effects
+# ------------------------------------------------------------
+
+snps_comuns <- intersect(
+  colnames(geno_DH),
+  rownames(MarkEff_piloto)
+)
+
+geno_DH2 <- geno_DH[, snps_comuns, drop = FALSE]
+MarkEff_DH <- MarkEff_piloto[snps_comuns, , drop = FALSE]
+
+cat("\nAlignment DH genotypes x marker effects:\n")
+print(all(colnames(geno_DH2) == rownames(MarkEff_DH)))
+
+gv_DH <- geno_DH2 %*% MarkEff_DH
+
