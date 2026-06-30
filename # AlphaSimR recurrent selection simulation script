@@ -1,17 +1,20 @@
 # ============================================================
-# Inputs:
-# - sim_inputs_real.rds
-# - cruzamentos_programa_B_top50_por_cenario.rds
-# - testadores_grupo_A.rds
+# 04_run_recurrent_simulation_AlphaSimR_real_data.R
 #
-# Outputs:
-# - AlphaSimR_cycle_summary_recorrente.rds/csv
-# - AlphaSimR_elites_recorrente.rds/csv
-# - AlphaSimR_TC_selected_recorrente.rds/csv
-# - AlphaSimR_crosses_used_recorrente.rds/csv
-# ============================================================
-
-rm(list = ls())
+# Purpose:
+# Run a recurrent selection simulation using AlphaSimR with
+# real maize genomic data and real BayesB marker effects.
+#
+# AlphaSimR is used for:
+# - crossing;
+# - recombination;
+# - doubled-haploid generation.
+#
+# Custom R routines are used for:
+# - testcross evaluation;
+# - phenotypic error simulation;
+# - selection;
+# - elite recycling.
 
 library(dplyr)
 library(AlphaSimR)
@@ -160,8 +163,11 @@ get_h2_stage <- function(scenario, stage) {
 get_score <- function(df, scenario) {
   
   if (scenario %in% c("AP", "AE", "FF", "FM")) {
+    
     score <- df[[scenario]]
+    
   } else {
+    
     score <- rowMeans(
       df[, c("AP", "AE", "FF", "FM"), drop = FALSE],
       na.rm = TRUE
@@ -181,7 +187,11 @@ add_field_error <- function(gv, h2) {
     ve <- vg * (1 - h2) / h2
   }
   
-  pheno <- gv + rnorm(length(gv), mean = 0, sd = sqrt(ve))
+  pheno <- gv + rnorm(
+    n = length(gv),
+    mean = 0,
+    sd = sqrt(ve)
+  )
   
   return(pheno)
 }
@@ -642,7 +652,6 @@ for (sc in cenarios) {
     )
     
     all_cycle_summary[[paste(sc, cycle, sep = "_C")]] <- TC_summary_cycle
-    
     all_elites[[paste(sc, cycle, sep = "_C")]] <- elite_cycle
     
     all_TC_summary[[paste(sc, cycle, sep = "_C")]] <- dplyr::bind_rows(
@@ -668,22 +677,60 @@ elites_all <- dplyr::bind_rows(all_elites)
 TC_selected_all <- dplyr::bind_rows(all_TC_summary)
 crosses_used_all <- dplyr::bind_rows(all_crosses_used)
 
-saveRDS(cycle_summary_all, "AlphaSimR_cycle_summary_recorrente.rds")
-saveRDS(elites_all, "AlphaSimR_elites_recorrente.rds")
-saveRDS(TC_selected_all, "AlphaSimR_TC_selected_recorrente.rds")
-saveRDS(crosses_used_all, "AlphaSimR_crosses_used_recorrente.rds")
+saveRDS(
+  cycle_summary_all,
+  "AlphaSimR_cycle_summary_recorrente.rds"
+)
 
-write.csv(cycle_summary_all, "AlphaSimR_cycle_summary_recorrente.csv", row.names = FALSE)
-write.csv(elites_all, "AlphaSimR_elites_recorrente.csv", row.names = FALSE)
-write.csv(TC_selected_all, "AlphaSimR_TC_selected_recorrente.csv", row.names = FALSE)
-write.csv(crosses_used_all, "AlphaSimR_crosses_used_recorrente.csv", row.names = FALSE)
+saveRDS(
+  elites_all,
+  "AlphaSimR_elites_recorrente.rds"
+)
+
+saveRDS(
+  TC_selected_all,
+  "AlphaSimR_TC_selected_recorrente.rds"
+)
+
+saveRDS(
+  crosses_used_all,
+  "AlphaSimR_crosses_used_recorrente.rds"
+)
+
+write.csv(
+  cycle_summary_all,
+  "AlphaSimR_cycle_summary_recorrente.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  elites_all,
+  "AlphaSimR_elites_recorrente.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  TC_selected_all,
+  "AlphaSimR_TC_selected_recorrente.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  crosses_used_all,
+  "AlphaSimR_crosses_used_recorrente.csv",
+  row.names = FALSE
+)
 
 cat("\n============================================================\n")
 cat("ALPHASIMR RECURRENT SIMULATION COMPLETED SUCCESSFULLY\n")
 cat("============================================================\n")
 
 cat("\nFiles saved:\n")
-cat("- AlphaSimR_cycle_summary_recorrente.rds/csv\n")
-cat("- AlphaSimR_elites_recorrente.rds/csv\n")
-cat("- AlphaSimR_TC_selected_recorrente.rds/csv\n")
-cat("- AlphaSimR_crosses_used_recorrente.rds/csv\n")
+cat("- AlphaSimR_cycle_summary_recorrente.rds\n")
+cat("- AlphaSimR_cycle_summary_recorrente.csv\n")
+cat("- AlphaSimR_elites_recorrente.rds\n")
+cat("- AlphaSimR_elites_recorrente.csv\n")
+cat("- AlphaSimR_TC_selected_recorrente.rds\n")
+cat("- AlphaSimR_TC_selected_recorrente.csv\n")
+cat("- AlphaSimR_crosses_used_recorrente.rds\n")
+cat("- AlphaSimR_crosses_used_recorrente.csv\n")
