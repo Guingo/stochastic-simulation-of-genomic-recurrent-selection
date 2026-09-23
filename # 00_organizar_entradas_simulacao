@@ -1,0 +1,323 @@
+# ============================================================
+# SCRIPT 00
+library(dplyr)
+set.seed(123)
+# ============================================================
+# 1. Arquivos de entrada
+# ============================================================
+
+arquivo_matriz_marcadores <- 
+  "C:/DadosR/Dados Milho Tropical/Dados_Milho/Matriz_dos_Marcadores_350.rds"
+
+arquivo_mapa_genetico <- 
+  "C:/DadosR/Dados Milho Tropical/Dados_Milho/GenMap_final_13826_completo.rds"
+
+arquivo_efeitos_marcadores <- 
+  "C:/DadosR/Dados Milho Tropical/efeitos_combinados_new.csv"
+
+arquivo_plano_AP <- "C:/DadosR/Dados Milho Tropical/maxGainPlan_AP.rds"
+arquivo_plano_AE <- "C:/DadosR/Dados Milho Tropical/maxGainPlan_AE.rds"
+arquivo_plano_FF <- "C:/DadosR/Dados Milho Tropical/maxGainPlan_FF.rds"
+arquivo_plano_FM <- "C:/DadosR/Dados Milho Tropical/maxGainPlan_FM.rds"
+arquivo_plano_MT <- "C:/DadosR/Dados Milho Tropical/maxGainPlan_MT.rds"
+arquivo_plano_Culling <- "C:/DadosR/Dados Milho Tropical/Culling_MT.rds"
+
+# ============================================================
+# 2. Carregar dados
+# ============================================================
+
+matriz_marcadores <- readRDS(arquivo_matriz_marcadores)
+matriz_marcadores <- as.matrix(matriz_marcadores)
+mapa_genetico <- readRDS(arquivo_mapa_genetico)
+
+efeitos_marcadores <- read.csv(
+  arquivo_efeitos_marcadores,
+  stringsAsFactors = FALSE
+)
+
+plano_AP_bruto <- readRDS(arquivo_plano_AP)
+plano_AE_bruto <- readRDS(arquivo_plano_AE)
+plano_FF_bruto <- readRDS(arquivo_plano_FF)
+plano_FM_bruto <- readRDS(arquivo_plano_FM)
+plano_MT_bruto <- readRDS(arquivo_plano_MT)
+plano_Culling_bruto <- readRDS(arquivo_plano_Culling)
+
+# ============================================================
+# 3. Conferir colunas necessárias
+# ============================================================
+
+colunas_mapa <- c("marker", "chr", "pos", "pos_bp", "pos_cM", "pos_M")
+colunas_efeitos <- c("Marcador", "Efeito_AP", "Efeito_AE", "Efeito_FF", "Efeito_FM")
+
+if (!all(colunas_mapa %in% colnames(mapa_genetico))) {
+  stop("Faltam colunas no mapa genético.")
+}
+
+if (!all(colunas_efeitos %in% colnames(efeitos_marcadores))) {
+  stop("Faltam colunas no arquivo de efeitos.")
+}
+
+# ============================================================
+# 4. Ajustar tipos
+# ============================================================
+
+mapa_genetico <- mapa_genetico %>%
+  mutate(
+    marker = as.character(marker),
+    chr = as.integer(chr),
+    pos = as.numeric(pos),
+    pos_bp = as.numeric(pos_bp),
+    pos_cM = as.numeric(pos_cM),
+    pos_M = as.numeric(pos_M)
+  )
+
+efeitos_marcadores <- efeitos_marcadores %>%
+  mutate(
+    Marcador = as.character(Marcador),
+    Efeito_AP = as.numeric(Efeito_AP),
+    Efeito_AE = as.numeric(Efeito_AE),
+    Efeito_FF = as.numeric(Efeito_FF),
+    Efeito_FM = as.numeric(Efeito_FM)
+  )
+
+# ============================================================
+# 6. Conferir duplicações
+# ============================================================
+
+if (any(duplicated(colnames(matriz_marcadores)))) {
+  stop("Existem marcadores duplicados na matriz.")
+}
+
+if (any(duplicated(mapa_genetico$marker))) {
+  stop("Existem marcadores duplicados no mapa.")
+}
+
+if (any(duplicated(efeitos_marcadores$Marcador))) {
+  stop("Existem marcadores duplicados nos efeitos.")
+}
+
+# ============================================================
+# 7. Alinhar matriz, mapa e efeitos
+# ============================================================
+
+marcadores_comuns <- Reduce(
+  intersect,
+  list(
+    colnames(matriz_marcadores),
+    mapa_genetico$marker,
+    efeitos_marcadores$Marcador
+  )
+)
+
+cat("\nMarcadores comuns:", length(marcadores_comuns), "\n")
+
+if (length(marcadores_comuns) == 0) {
+  stop("Nenhum marcador comum encontrado.")
+}
+
+mapa_alinhado <- mapa_genetico %>%
+  filter(marker %in% marcadores_comuns) %>%
+  arrange(chr, pos_M)
+
+matriz_alinhada <- matriz_marcadores[, mapa_alinhado$marker, drop = FALSE]
+
+efeitos_alinhados <- efeitos_marcadores %>%
+  filter(Marcador %in% mapa_alinhado$marker) %>%
+  slice(match(mapa_alinhado$marker, Marcador))
+
+if (!all(colnames(matriz_alinhada) == mapa_alinhado$marker)) {
+  stop("Matriz e mapa não estão alinhados.")
+}
+
+if (!all(efeitos_alinhados$Marcador == mapa_alinhado$marker)) {
+  stop("Efeitos e mapa não estão alinhados.")
+}
+
+# ============================================================
+# 8. Conferir mapa genético
+# ============================================================
+
+resumo_mapa <- mapa_alinhado %>%
+  group_by(chr) %>%
+  summarise(
+    n_marcadores = n(),
+    min_bp = min(pos_bp),
+    max_bp = max(pos_bp),
+    min_cM = min(pos_cM),
+    max_cM = max(pos_cM),
+    comprimento_cM = max_cM - min_cM,
+    min_M = min(pos_M),
+    max_M = max(pos_M),
+    comprimento_M = max_M - min_M,
+    n_inversoes = sum(diff(pos_M) < 0),
+    mapa_monotonico = all(diff(pos_M) >= 0),
+    .groups = "drop"
+  )
+
+print(resumo_mapa)
+
+if (any(is.na(mapa_alinhado$pos_M))) {
+  stop("O mapa contém posições ausentes em Morgans.")
+}
+
+if (any(!is.finite(mapa_alinhado$pos_M))) {
+  stop("O mapa contém posições não finitas em Morgans.")
+}
+
+if (any(resumo_mapa$n_inversoes > 0)) {
+  stop("O mapa apresenta inversões.")
+}
+
+# ============================================================
+# 9. Limpar matriz de marcadores
+# ============================================================
+
+cat("\nClasses genotípicas antes da limpeza:\n")
+print(table(as.vector(matriz_alinhada), useNA = "ifany"))
+
+matriz_limpa <- matriz_alinhada
+matriz_limpa[matriz_limpa == 1] <- NA
+
+for (j in seq_len(ncol(matriz_limpa))) {
+  
+  if (any(is.na(matriz_limpa[, j]))) {
+    
+    tabela_marcador <- table(matriz_limpa[, j])
+    
+    if (length(tabela_marcador) == 0) {
+      matriz_limpa[is.na(matriz_limpa[, j]), j] <- 0
+    } else {
+      alelo_mais_frequente <- as.numeric(
+        names(tabela_marcador)[which.max(tabela_marcador)]
+      )
+      matriz_limpa[is.na(matriz_limpa[, j]), j] <- alelo_mais_frequente
+    }
+  }
+}
+
+cat("\nClasses genotípicas após imputação:\n")
+print(table(as.vector(matriz_limpa), useNA = "ifany"))
+
+if (any(is.na(matriz_limpa))) {
+  stop("Ainda existem genótipos ausentes.")
+}
+
+if (!all(sort(unique(as.vector(matriz_limpa))) %in% c(0, 2))) {
+  stop("A matriz final contém valores diferentes de 0 e 2.")
+}
+
+# ============================================================
+# 10. Criar matriz de efeitos
+# ============================================================
+
+matriz_efeitos <- efeitos_alinhados %>%
+  select(Efeito_AP, Efeito_AE, Efeito_FF, Efeito_FM) %>%
+  as.matrix()
+
+rownames(matriz_efeitos) <- efeitos_alinhados$Marcador
+colnames(matriz_efeitos) <- c("AP", "AE", "FF", "FM")
+
+if (!all(colnames(matriz_limpa) == rownames(matriz_efeitos))) {
+  stop("Matriz de marcadores e matriz de efeitos não estão alinhadas.")
+}
+
+if (any(is.na(matriz_efeitos)) || any(!is.finite(matriz_efeitos))) {
+  stop("A matriz de efeitos contém valores ausentes ou não finitos.")
+}
+
+# ============================================================
+# 11. Sentido dos efeitos
+# ============================================================
+
+objetivo_biologico <- c(
+  AP = "reduzir",
+  AE = "reduzir",
+  FF = "reduzir",
+  FM = "reduzir"
+)
+
+direcao_do_score <- c(
+  AP = 1,
+  AE = 1,
+  FF = 1,
+  FM = 1
+)
+
+sentido_dos_efeitos <- 
+  "Efeitos ja convertidos para reducao. Maior score genetico = melhor. Nao inverter novamente."
+
+# ============================================================
+# 12. Mapa para AlphaSimR
+# ============================================================
+
+mapa_AlphaSimR <- mapa_alinhado %>%
+  transmute(
+    marker = marker,
+    chr = chr,
+    pos = pos_M
+  )
+
+if (!all(mapa_AlphaSimR$marker == colnames(matriz_limpa))) {
+  stop("O mapa para AlphaSimR não está alinhado com a matriz.")
+}
+
+# ============================================================
+# 13. Organizar planos do SimpleMating
+# ============================================================
+
+extrair_plano <- function(plano_bruto, nome_cenario) {
+  
+  if (is.list(plano_bruto) && "plan" %in% names(plano_bruto)) {
+    plano <- plano_bruto$plan
+  } else if (is.data.frame(plano_bruto)) {
+    plano <- plano_bruto
+  } else {
+    stop(paste("Não foi possível extrair o plano do cenário:", nome_cenario))
+  }
+  
+  colunas_necessarias <- c("Parent1", "Parent2", "Y", "K")
+  
+  if (!all(colunas_necessarias %in% colnames(plano))) {
+    stop(paste("Faltam colunas no plano do cenário:", nome_cenario))
+  }
+  
+  plano %>%
+    select(Parent1, Parent2, Y, K) %>%
+    mutate(
+      cenario = nome_cenario,
+      Parent1 = as.character(Parent1),
+      Parent2 = as.character(Parent2),
+      cruzamento_id = paste(Parent1, Parent2, sep = "_")
+    ) %>%
+    select(cenario, cruzamento_id, Parent1, Parent2, Y, K)
+}
+
+plano_AP <- extrair_plano(plano_AP_bruto, "AP")
+plano_AE <- extrair_plano(plano_AE_bruto, "AE")
+plano_FF <- extrair_plano(plano_FF_bruto, "FF")
+plano_FM <- extrair_plano(plano_FM_bruto, "FM")
+plano_MT <- extrair_plano(plano_MT_bruto, "MT")
+plano_Culling <- extrair_plano(plano_Culling_bruto, "Culling")
+
+planos_todos <- bind_rows(
+  plano_AP,
+  plano_AE,
+  plano_FF,
+  plano_FM,
+  plano_MT,
+  plano_Culling
+)
+
+cat("\nCruzamentos por cenário:\n")
+print(table(planos_todos$cenario))
+
+parentais_nos_planos <- unique(c(planos_todos$Parent1, planos_todos$Parent2))
+
+parentais_faltando <- parentais_nos_planos[
+  !(parentais_nos_planos %in% rownames(matriz_limpa))
+]
+
+if (length(parentais_faltando) > 0) {
+  print(head(parentais_faltando))
+  stop("Existem parentais dos planos ausentes na matriz de marcadores.")
+}
