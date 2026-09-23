@@ -1,178 +1,239 @@
-# ============================================================
-# 01_classify_genetic_groups_PCA_kmeans.R
-#
-# Purpose:
-# Classify maize inbred lines into two operational genetic
-# groups using SNP-derived PCA followed by k-means clustering.
-#
-# This script defines the genetic groups that will be used as:
-# - one recurrent selection group;
-# - one opposite group used as source of testers.
-#
-# Inputs:
-# - sim_inputs_real.rds
-#
-# Outputs:
-# - grupos_linhagens_A_B.rds
-# - grupos_linhagens_A_B.csv
-# - pca_grupos_linhagens_A_B.rds
-# - pca_grupos_linhagens_A_B.csv
-# - PCA_grupos_geneticos_A_B.png
-# - PCA_grupos_geneticos_A_B.pdf
-# ============================================================
-
-rm(list = ls())
 
 library(dplyr)
 library(ggplot2)
-
 set.seed(123)
 
-# ------------------------------------------------------------
-# 1. Load real genomic inputs
-# ------------------------------------------------------------
+# ============================================================
+# 1. Carregar entradas organizadas
+# ============================================================
+entrada <- readRDS("sim_inputs_real.rds")
+matriz_marcadores <- entrada$matriz_marcadores
 
-sim_inputs_real <- readRDS("sim_inputs_real.rds")
-
-geno <- as.matrix(sim_inputs_real$geno)
-
-# ------------------------------------------------------------
-# 2. Remove markers with zero or undefined variance
-# ------------------------------------------------------------
-
-var_snp <- apply(
-  geno,
+# ============================================================
+# 2. Preparar matriz para PCA
+# ============================================================
+cat("\nPreparando matriz para PCA...\n")
+matriz_pca <- matriz_marcadores
+variancia_marcadores <- apply(
+  matriz_pca,
   2,
   var,
   na.rm = TRUE
 )
 
-snps_validos <- names(var_snp)[
-  !is.na(var_snp) & var_snp > 0
+marcadores_validos <- names(variancia_marcadores)[
+  is.finite(variancia_marcadores) &
+    variancia_marcadores > 0
 ]
 
-geno_pca <- geno[, snps_validos, drop = FALSE]
+matriz_pca <- matriz_pca[
+  ,
+  marcadores_validos,
+  drop = FALSE
+]
 
-# ------------------------------------------------------------
-# 3. Standardize SNP marker matrix
-# ------------------------------------------------------------
+cat("\nMarcadores usados na PCA:\n")
+cat(ncol(matriz_pca), "\n")
 
-geno_scaled <- scale(
-  geno_pca,
+# ============================================================
+# 3. Rodar PCA
+# ============================================================
+cat("\nRodando PCA...\n")
+pca_resultado <- prcomp(
+  matriz_pca,
   center = TRUE,
-  scale = TRUE
+  scale. = TRUE,
+  rank. = 10
 )
 
-# Remove any columns with non-finite values after scaling
-col_ok <- apply(
-  geno_scaled,
-  2,
-  function(x) all(is.finite(x))
+variancia_pca <- data.frame(
+  PC = paste0("PC", seq_along(pca_resultado$sdev)),
+  Variancia_percentual = (pca_resultado$sdev^2 / sum(pca_resultado$sdev^2)) * 100
 )
 
-geno_scaled <- geno_scaled[, col_ok, drop = FALSE]
+cat("\nVariância explicada pelos primeiros componentes:\n")
+print(head(variancia_pca, 10))
 
-# ------------------------------------------------------------
-# 4. Principal component analysis
-# ------------------------------------------------------------
+scores_pca <- as.data.frame(pca_resultado$x)
+scores_pca$Linhagem <- rownames(matriz_pca)
+scores_pca <- scores_pca %>%
+  dplyr::select(Linhagem, dplyr::everything())
 
-pca_geno <- prcomp(
-  geno_scaled,
-  center = FALSE,
-  scale. = FALSE
+# ============================================================
+# 4. Definir dois grupos genéticos operacionais
+# ============================================================
+cat("\nClassificando dois grupos genéticos operacionais...\n")
+
+k_grupos <- 2
+kmeans_grupos <- kmeans(
+  scores_pca[, c("PC1", "PC2")],
+  centers = k_grupos,
+  nstart = 100
 )
 
-var_exp <- summary(pca_geno)$importance[2, 1:5] * 100
+scores_pca$Cluster_k2 <- as.factor(kmeans_grupos$cluster)
+tabela_clusters <- table(scores_pca$Cluster_k2)
+cat("\nTamanho dos clusters iniciais:\n")
+print(tabela_clusters)
 
-cat("\nVariance explained by the first five PCs (%):\n")
-print(round(var_exp, 2))
+cluster_selecao <- names(which.max(tabela_clusters))
+cluster_testador <- names(which.min(tabela_clusters))
 
-pca_df <- data.frame(
-  Linhagem = rownames(geno),
-  PC1 = pca_geno$x[, 1],
-  PC2 = pca_geno$x[, 2],
-  PC3 = pca_geno$x[, 3],
-  PC4 = pca_geno$x[, 4],
-  PC5 = pca_geno$x[, 5],
-  stringsAsFactors = FALSE
-)
-
-# ------------------------------------------------------------
-# 5. Classify lines into two genetic groups using k-means
-# ------------------------------------------------------------
-
-km <- kmeans(
-  pca_df[, c("PC1", "PC2")],
-  centers = 2,
-  nstart = 50
-)
-
-pca_df$Cluster_kmeans <- km$cluster
-
-pca_df$Grupo <- paste0("Grupo_", km$cluster)
-
-pca_df$Grupo <- dplyr::recode(
-  pca_df$Grupo,
-  "Grupo_1" = "A",
-  "Grupo_2" = "B"
-)
-
-grupos_linhagens <- pca_df %>%
-  dplyr::select(
-    Linhagem,
-    Grupo
+scores_pca <- scores_pca %>%
+  dplyr::mutate(
+    Grupo_operacional = ifelse(
+      Cluster_k2 == cluster_selecao,
+      "Grupo_selecao_recorrente",
+      "Grupo_oposto_testador"
+    )
+  ) %>%
+  dplyr::mutate(
+    Grupo = ifelse(
+      Grupo_operacional == "Grupo_selecao_recorrente",
+      "B",
+      "A"
+    )
   )
 
-cat("\nNumber of lines per genetic group:\n")
-print(table(grupos_linhagens$Grupo))
+cat("\nResumo dos grupos operacionais:\n")
+print(table(scores_pca$Grupo_operacional))
 
-# ------------------------------------------------------------
-# 6. Calculate group centroids in PCA space
-# ------------------------------------------------------------
+cat("\nResumo dos grupos A/B:\n")
+print(table(scores_pca$Grupo))
 
-centroides_grupos <- pca_df %>%
-  dplyr::group_by(Grupo) %>%
+# ============================================================
+# 5. Calcular centroides dos grupos
+# ============================================================
+
+cat("\nCalculando centroides dos grupos operacionais...\n")
+
+centroides_grupos <- scores_pca %>%
+  dplyr::group_by(Grupo, Grupo_operacional) %>%
   dplyr::summarise(
-    PC1_centroid = mean(PC1),
-    PC2_centroid = mean(PC2),
-    n_linhas = dplyr::n(),
+    PC1_centroide = mean(PC1),
+    PC2_centroide = mean(PC2),
+    n_linhagens = dplyr::n(),
     .groups = "drop"
   )
 
-cat("\nGroup centroids in PCA space:\n")
+cat("\nCentroides dos grupos operacionais:\n")
 print(centroides_grupos)
 
-# ------------------------------------------------------------
-# 7. PCA plot with genetic groups
-# ------------------------------------------------------------
+# ============================================================
+# 6. Selecionar testadores via PCA dentro do grupo oposto
+# ============================================================
 
-plot_grupos <- ggplot(
-  pca_df,
-  aes(x = PC1, y = PC2, color = Grupo)
-) +
-  geom_point(size = 3, alpha = 0.85) +
-  geom_point(
-    data = centroides_grupos,
-    aes(x = PC1_centroid, y = PC2_centroid, color = Grupo),
-    size = 5,
-    shape = 4,
-    stroke = 1.4,
-    inherit.aes = FALSE
-  ) +
-  theme_classic(base_size = 14) +
-  labs(
-    x = paste0("PC1 (", round(var_exp[1], 2), "%)"),
-    y = paste0("PC2 (", round(var_exp[2], 2), "%)"),
-    color = "Genetic group"
+cat("\nSelecionando testadores via PCA...\n")
+
+dados_grupo_testador <- scores_pca %>%
+  dplyr::filter(Grupo_operacional == "Grupo_oposto_testador")
+
+if (nrow(dados_grupo_testador) < 3) {
+  stop("O grupo oposto/testador possui menos de 3 linhagens.")
+}
+
+k_testadores <- 3
+
+kmeans_testadores <- kmeans(
+  dados_grupo_testador[, c("PC1", "PC2")],
+  centers = k_testadores,
+  nstart = 100
+)
+
+dados_grupo_testador$Subgrupo_testador <- as.factor(kmeans_testadores$cluster)
+
+centroides_testadores <- as.data.frame(kmeans_testadores$centers)
+
+centroides_testadores$Subgrupo_testador <- as.factor(
+  seq_len(nrow(centroides_testadores))
+)
+
+colnames(centroides_testadores)[1:2] <- c(
+  "PC1_centroide_subgrupo",
+  "PC2_centroide_subgrupo"
+)
+
+dados_grupo_testador <- dados_grupo_testador %>%
+  dplyr::left_join(
+    centroides_testadores,
+    by = "Subgrupo_testador"
+  ) %>%
+  dplyr::mutate(
+    Distancia_centroide = sqrt(
+      (PC1 - PC1_centroide_subgrupo)^2 +
+        (PC2 - PC2_centroide_subgrupo)^2
+    )
   )
 
-print(plot_grupos)
+testadores_selecionados <- dados_grupo_testador %>%
+  dplyr::group_by(Subgrupo_testador) %>%
+  dplyr::slice_min(
+    order_by = Distancia_centroide,
+    n = 1,
+    with_ties = FALSE
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(Subgrupo_testador) %>%
+  dplyr::mutate(
+    Tipo = "Testador_representativo_via_PCA"
+  ) %>%
+  dplyr::select(
+    Linhagem,
+    Grupo,
+    Grupo_operacional,
+    Subgrupo_testador,
+    PC1,
+    PC2,
+    Distancia_centroide,
+    Tipo
+  )
 
-# ------------------------------------------------------------
-# 8. Save outputs
-# ------------------------------------------------------------
+cat("\nTestadores selecionados:\n")
+print(testadores_selecionados)
 
-saveRDS(grupos_linhagens,"grupos_linhagens_A_B.rds")
-saveRDS(pca_df,"pca_grupos_linhagens_A_B.rds")
-ggsave(filename = "PCA_grupos_geneticos_A_B.png",plot = plot_grupos,width = 7.5,height = 5.5,dpi = 300)
-ggsave(filename = "PCA_grupos_geneticos_A_B.pdf",plot = plot_grupos,width = 7.5,height = 5.5)
+# ============================================================
+# 7. Adicionar informação de testador na tabela principal
+# ============================================================
+
+scores_pca <- scores_pca %>%
+  dplyr::mutate(
+    Testador_selecionado = ifelse(
+      Linhagem %in% testadores_selecionados$Linhagem,
+      "Sim",
+      "Nao"
+    )
+  )
+
+
+
+# ============================================================
+#  Salvar objeto completo
+# ============================================================
+
+resultado_grupos <- list(
+  
+  matriz_usada_PCA = matriz_pca,
+  
+  pca_resultado = pca_resultado,
+  
+  variancia_pca = variancia_pca,
+  
+  scores_pca = scores_pca,
+  
+  kmeans_grupos = kmeans_grupos,
+  
+  centroides_grupos = centroides_grupos,
+  
+  dados_grupo_testador = dados_grupo_testador,
+  
+  kmeans_testadores = kmeans_testadores,
+  
+  centroides_testadores = centroides_testadores,
+  
+  testadores_selecionados = testadores_selecionados
+)
+
+saveRDS(
+  resultado_grupos,
+  "resultado_grupos_geneticos_e_testadores.rds"
+)
