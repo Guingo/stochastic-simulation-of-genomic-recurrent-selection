@@ -1,0 +1,225 @@
+library(AlphaSimR)
+library(dplyr)
+set.seed(123)
+entrada <- readRDS("sim_inputs_real.rds")
+
+matriz_marcadores <- entrada$matriz_marcadores
+mapa_AlphaSimR <- entrada$mapa_AlphaSimR
+matriz_efeitos <- entrada$matriz_efeitos
+
+# ============================================================
+# 1. Criar subconjunto piloto
+# ============================================================
+
+n_linhagens_teste <- 100
+n_snp_por_cromossomo <- 200
+linhagens_teste <- rownames(matriz_marcadores)[1:n_linhagens_teste]
+
+marcadores_teste <- mapa_AlphaSimR %>%
+  dplyr::group_by(chr) %>%
+  dplyr::slice_head(n = n_snp_por_cromossomo) %>%
+  dplyr::ungroup()
+
+matriz_teste <- matriz_marcadores[
+  linhagens_teste,
+  marcadores_teste$marker,
+  drop = FALSE
+]
+
+mapa_teste <- marcadores_teste
+
+efeitos_teste <- matriz_efeitos[
+  mapa_teste$marker,
+  ,
+  drop = FALSE
+]
+
+cat("\nDimensões do piloto:\n")
+cat("Matriz piloto:", dim(matriz_teste), "\n")
+cat("Mapa piloto:", dim(mapa_teste), "\n")
+cat("Efeitos piloto:", dim(efeitos_teste), "\n")
+
+cat("\nSNPs por cromossomo no piloto:\n")
+print(table(mapa_teste$chr))
+
+cat("\nClasses genotípicas do piloto:\n")
+print(table(as.vector(matriz_teste), useNA = "ifany"))
+
+# ============================================================
+# 2. Preparar mapa para importação no AlphaSimR
+# ============================================================
+
+# O AlphaSimR precisa receber o mapa como data.frame base. O mapa deve conter:
+# marker = nome do marcador
+# chr    = cromossomo
+# pos    = posição genética em Morgans
+
+mapa_teste_AlphaSimR <- mapa_teste %>%
+  dplyr::select(marker, chr, pos) %>%
+  as.data.frame()
+
+mapa_teste_AlphaSimR$marker <- as.character(mapa_teste_AlphaSimR$marker)
+mapa_teste_AlphaSimR$chr <- as.integer(mapa_teste_AlphaSimR$chr)
+mapa_teste_AlphaSimR$pos <- as.numeric(mapa_teste_AlphaSimR$pos)
+
+if (!all(mapa_teste_AlphaSimR$marker == colnames(matriz_teste))) {
+  stop("A ordem dos marcadores no mapa não está igual à matriz_teste.")
+}
+
+# ============================================================
+# . Importar genótipos reais no AlphaSimR
+# ============================================================
+
+cat("\nImportando genótipos no AlphaSimR...\n")
+
+genoma_fundador <- importInbredGeno(
+  geno = matriz_teste,
+  genMap = mapa_teste_AlphaSimR
+)
+
+parametros_simulacao <- SimParam$new(genoma_fundador)
+
+parametros_simulacao$setTrackPed(TRUE)
+
+parametros_simulacao$addSnpChipByName(
+  markers = colnames(matriz_teste)
+)
+
+populacao_base <- newPop(
+  rawPop = genoma_fundador,
+  simParam = parametros_simulacao
+)
+
+# O AlphaSimR cria IDs numéricos automaticamente.
+# Aqui recuperamos os nomes reais das linhagens.
+populacao_base@id <- rownames(matriz_teste)
+
+cat("\nPopulação base criada no AlphaSimR:\n")
+cat("Número de indivíduos:", populacao_base@nInd, "\n")
+cat("Número de cromossomos:", populacao_base@nChr, "\n")
+
+cat("\nPrimeiros IDs da população base:\n")
+print(head(populacao_base@id))
+
+# ============================================================
+# . Conferir genótipos importados
+# ============================================================
+
+genotipos_base <- pullSnpGeno(
+  pop = populacao_base,
+  simParam = parametros_simulacao
+)
+
+cat("\nDimensão dos genótipos recuperados da população base:\n")
+print(dim(genotipos_base))
+
+cat("\nClasses genotípicas recuperadas da população base:\n")
+print(table(as.vector(genotipos_base), useNA = "ifany"))
+
+if (!all(sort(unique(as.vector(genotipos_base))) %in% c(0, 2))) {
+  stop("Após importação, os genótipos não ficaram apenas como 0 e 2.")
+}
+
+# ============================================================
+# Criar cruzamentos de teste
+# ============================================================
+
+cat("\nCriando cruzamentos de teste...\n")
+
+plano_cruzamentos_teste <- data.frame(
+  Parent1 = linhagens_teste[c(1, 3, 5)],
+  Parent2 = linhagens_teste[c(2, 4, 6)],
+  stringsAsFactors = FALSE
+)
+
+print(plano_cruzamentos_teste)
+
+ids_populacao <- populacao_base@id
+
+indice_parental_1 <- match(
+  plano_cruzamentos_teste$Parent1,
+  ids_populacao
+)
+
+indice_parental_2 <- match(
+  plano_cruzamentos_teste$Parent2,
+  ids_populacao
+)
+
+cat("\nÍndices dos parentais:\n")
+print(data.frame(
+  Parent1 = plano_cruzamentos_teste$Parent1,
+  indice_parental_1 = indice_parental_1,
+  Parent2 = plano_cruzamentos_teste$Parent2,
+  indice_parental_2 = indice_parental_2
+))
+
+if (any(is.na(indice_parental_1)) || any(is.na(indice_parental_2))) {
+  stop("Algum parental do teste não foi encontrado na população base.")
+}
+
+plano_indices <- cbind(
+  indice_parental_1,
+  indice_parental_2
+)
+
+populacao_F1 <- makeCross(
+  pop = populacao_base,
+  crossPlan = plano_indices,
+  simParam = parametros_simulacao
+)
+
+cat("\nPopulação F1 criada:\n")
+cat("Número de indivíduos F1:", populacao_F1@nInd, "\n")
+
+# ============================================================
+#  Gerar DHs de teste
+# ============================================================
+
+cat("\nGerando DHs de teste...\n")
+
+n_DH_por_cruzamento <- 20
+
+populacao_DH <- makeDH(
+  pop = populacao_F1,
+  nDH = n_DH_por_cruzamento,
+  simParam = parametros_simulacao
+)
+
+cat("\nPopulação DH criada:\n")
+cat("Número de DHs:", populacao_DH@nInd, "\n")
+
+genotipos_DH <- pullSnpGeno(
+  pop = populacao_DH,
+  simParam = parametros_simulacao
+)
+
+cat("\nDimensão dos genótipos DH:\n")
+print(dim(genotipos_DH))
+
+cat("\nClasses genotípicas dos DHs:\n")
+print(table(as.vector(genotipos_DH), useNA = "ifany"))
+
+if (!all(sort(unique(as.vector(genotipos_DH))) %in% c(0, 2))) {
+  stop("Os DHs possuem genótipos diferentes de 0 e 2.")
+}
+
+# ============================================================
+# Calcular scores genéticos dos DHs
+# ============================================================
+
+cat("\nCalculando scores genéticos dos DHs...\n")
+
+scores_DH <- genotipos_DH %*% efeitos_teste
+
+scores_DH <- as.data.frame(scores_DH)
+colnames(scores_DH) <- colnames(efeitos_teste)
+
+scores_DH$ID <- populacao_DH@id
+
+scores_DH <- scores_DH %>%
+  dplyr::select(ID, AP, AE, FF, FM)
+
+cat("\nResumo dos scores genéticos dos DHs:\n")
+print(summary(scores_DH[, c("AP", "AE", "FF", "FM")]))
+
