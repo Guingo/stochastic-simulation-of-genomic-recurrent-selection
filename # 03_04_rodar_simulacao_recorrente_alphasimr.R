@@ -1,6 +1,29 @@
+# ============================================================
+# SCRIPT 04 v2
+# Rodar simulação de seleção recorrente com AlphaSimR
+#
+# Versão correta para resultado final do artigo
+#
+# Correções principais:
+
+# - n_cycles = 6
+# - MT e Culling usam índice multicaracteres com escala fixa
+#   baseada no Grupo B inicial
+# - Genótipos dos elites são salvos no RDS final
+# - Arquivo final salvo como:
+#   resultados_simulacao_recorrente_alphasimr_v2.rds
+#
+# Importante:
+# Maior score = melhor.
+# Os efeitos já estão orientados para redução.
+# Não inverter sinal.
+# ============================================================
+
+
 
 library(AlphaSimR)
 library(dplyr)
+
 set.seed(123)
 
 # ============================================================
@@ -49,6 +72,7 @@ fator_h2_estagio <- c(
 cat("\nParâmetros principais:\n")
 cat("Repetições:", n_rep, "\n")
 cat("Ciclos:", n_cycles, "\n")
+cat("Cenários:", paste(cenarios, collapse = ", "), "\n")
 cat("Cruzamentos por ciclo:", n_cruzamentos_por_ciclo, "\n")
 cat("DHs por cruzamento:", n_DH_por_cruzamento, "\n")
 cat("DHs por ciclo:", n_cruzamentos_por_ciclo * n_DH_por_cruzamento, "\n")
@@ -58,27 +82,36 @@ cat("Intensidade UC:", i_uc, "\n")
 # ============================================================
 # 2. Carregar entradas
 # ============================================================
+
 entrada <- readRDS("sim_inputs_real.rds")
+
 matriz_marcadores <- entrada$matriz_marcadores
 mapa_AlphaSimR <- entrada$mapa_AlphaSimR
 matriz_efeitos <- entrada$matriz_efeitos
+
 entradas_cruzamentos <- readRDS(
   "entradas_cruzamentos_iniciais_simulacao.rds"
 )
+
 cruzamentos_iniciais_por_cenario <- entradas_cruzamentos$cruzamentos_iniciais_por_cenario
 testadores <- entradas_cruzamentos$testadores
 grupos_resumo <- entradas_cruzamentos$grupos_resumo
+
 testador_ids <- testadores$Linhagem
+
 parentais_grupo_B <- grupos_resumo$Linhagem[
   grupos_resumo$Grupo == "B"
 ]
 
 cat("\nDimensão da matriz de marcadores:\n")
 print(dim(matriz_marcadores))
+
 cat("\nDimensão da matriz de efeitos:\n")
 print(dim(matriz_efeitos))
-cat("\nNúmero de parentais no Grupo B:\n")
+
+cat("\nNúmero de parentais no Grupo B inicial:\n")
 print(length(parentais_grupo_B))
+
 cat("\nTestadores do Grupo A:\n")
 print(testador_ids)
 
@@ -89,18 +122,66 @@ print(testador_ids)
 if (!all(colnames(matriz_marcadores) == mapa_AlphaSimR$marker)) {
   stop("Matriz de marcadores e mapa AlphaSimR não estão alinhados.")
 }
+
 if (!all(colnames(matriz_marcadores) == rownames(matriz_efeitos))) {
   stop("Matriz de marcadores e matriz de efeitos não estão alinhadas.")
 }
+
 if (!all(parentais_grupo_B %in% rownames(matriz_marcadores))) {
   stop("Alguns parentais do Grupo B não estão na matriz de marcadores.")
 }
+
 if (!all(testador_ids %in% rownames(matriz_marcadores))) {
   stop("Alguns testadores não estão na matriz de marcadores.")
 }
 
+valores_marcadores <- sort(unique(as.vector(matriz_marcadores)))
+
+cat("\nValores encontrados na matriz de marcadores:\n")
+print(valores_marcadores)
+
+if (!all(valores_marcadores %in% c(0, 2))) {
+  stop("A matriz de marcadores deve conter apenas 0 e 2.")
+}
+
 # ============================================================
-# 4. Preparar mapa para AlphaSimR
+# 4. Criar escala fixa para índice multicaracteres
+# ============================================================
+
+cat("\nCriando escala fixa para o índice MT...\n")
+
+traits_indice <- c("AP", "AE", "FF", "FM")
+
+gv_grupo_B_inicial <- as.matrix(
+  matriz_marcadores[parentais_grupo_B, , drop = FALSE] %*% matriz_efeitos
+)
+
+colnames(gv_grupo_B_inicial) <- colnames(matriz_efeitos)
+
+media_base_indice <- colMeans(
+  gv_grupo_B_inicial[, traits_indice, drop = FALSE],
+  na.rm = TRUE
+)
+
+sd_base_indice <- apply(
+  gv_grupo_B_inicial[, traits_indice, drop = FALSE],
+  2,
+  sd,
+  na.rm = TRUE
+)
+
+sd_base_indice[
+  sd_base_indice == 0 | !is.finite(sd_base_indice)
+] <- 1
+
+cat("\nMédias fixas do Grupo B inicial:\n")
+print(media_base_indice)
+
+cat("\nDesvios-padrão fixos do Grupo B inicial:\n")
+print(sd_base_indice)
+
+# ============================================================
+# 5. Preparar mapa para AlphaSimR
 # ============================================================
 
 mapa_importacao <- mapa_AlphaSimR %>%
@@ -116,29 +197,37 @@ mapa_importacao$chr <- as.integer(mapa_importacao$chr)
 mapa_importacao$pos <- as.numeric(mapa_importacao$pos)
 
 # ============================================================
-# 5. Importar população base no AlphaSimR
+# 6. Importar população base no AlphaSimR
 # ============================================================
+
 cat("\nImportando população base no AlphaSimR...\n")
+
 genoma_fundador <- importInbredGeno(
   geno = matriz_marcadores,
   genMap = mapa_importacao
 )
+
 parametros_simulacao <- SimParam$new(genoma_fundador)
+
 parametros_simulacao$setTrackPed(TRUE)
+
 parametros_simulacao$addSnpChipByName(
   markers = colnames(matriz_marcadores)
 )
+
 pop_base <- newPop(
   rawPop = genoma_fundador,
   simParam = parametros_simulacao
 )
+
 pop_base@id <- rownames(matriz_marcadores)
+
 cat("\nPopulação base criada:\n")
 cat("Indivíduos:", pop_base@nInd, "\n")
 cat("Cromossomos:", pop_base@nChr, "\n")
 
 # ============================================================
-# 6. Funções auxiliares
+# 7. Funções auxiliares
 # ============================================================
 
 calc_indice_MT <- function(gv) {
@@ -147,9 +236,24 @@ calc_indice_MT <- function(gv) {
   
   gv_traits <- gv[, traits, drop = FALSE]
   
-  gv_padronizado <- scale(gv_traits)
+  gv_padronizado <- sweep(
+    gv_traits,
+    2,
+    media_base_indice[traits],
+    "-"
+  )
   
-  indice <- rowMeans(gv_padronizado, na.rm = TRUE)
+  gv_padronizado <- sweep(
+    gv_padronizado,
+    2,
+    sd_base_indice[traits],
+    "/"
+  )
+  
+  indice <- rowMeans(
+    gv_padronizado,
+    na.rm = TRUE
+  )
   
   return(as.numeric(indice))
 }
@@ -325,6 +429,25 @@ avaliar_estagio <- function(
   ))
 }
 
+selecionar_cruzamentos_culling <- function(candidatos, n_cruzamentos) {
+  
+  n1 <- max(n_cruzamentos, ceiling(nrow(candidatos) * 0.70))
+  n2 <- max(n_cruzamentos, ceiling(n1 * 0.70))
+  n3 <- max(n_cruzamentos, ceiling(n2 * 0.70))
+  
+  candidatos_sel <- candidatos %>%
+    dplyr::arrange(dplyr::desc(UC_AP)) %>%
+    dplyr::slice_head(n = n1) %>%
+    dplyr::arrange(dplyr::desc(UC_AE)) %>%
+    dplyr::slice_head(n = n2) %>%
+    dplyr::arrange(dplyr::desc(UC_FF)) %>%
+    dplyr::slice_head(n = n3) %>%
+    dplyr::arrange(dplyr::desc(UC_FM)) %>%
+    dplyr::slice_head(n = n_cruzamentos)
+  
+  return(candidatos_sel)
+}
+
 calcular_uc_cruzamentos <- function(
     parentais_ids,
     matriz_pool,
@@ -353,7 +476,10 @@ calcular_uc_cruzamentos <- function(
   geno_p1 <- matriz_pool[candidatos$Parent1, , drop = FALSE]
   geno_p2 <- matriz_pool[candidatos$Parent2, , drop = FALSE]
   
-  gv_pool <- as.matrix(matriz_pool[parentais_ids, , drop = FALSE] %*% matriz_efeitos)
+  gv_pool <- as.matrix(
+    matriz_pool[parentais_ids, , drop = FALSE] %*% matriz_efeitos
+  )
+  
   colnames(gv_pool) <- colnames(matriz_efeitos)
   
   gv_p1 <- gv_pool[candidatos$Parent1, , drop = FALSE]
@@ -364,7 +490,7 @@ calcular_uc_cruzamentos <- function(
   efeito2 <- matriz_efeitos^2
   
   sd_cruzamento <- matrix(
-    NA,
+    NA_real_,
     nrow = nrow(candidatos),
     ncol = ncol(matriz_efeitos)
   )
@@ -387,16 +513,43 @@ calcular_uc_cruzamentos <- function(
   
   colnames(uc_trait) <- colnames(matriz_efeitos)
   
-  candidatos$Y <- score_por_cenario(
-    gv = uc_trait,
-    cenario = cenario
-  )
+  candidatos$UC_AP <- uc_trait[, "AP"]
+  candidatos$UC_AE <- uc_trait[, "AE"]
+  candidatos$UC_FF <- uc_trait[, "FF"]
+  candidatos$UC_FM <- uc_trait[, "FM"]
+  candidatos$UC_MT <- calc_indice_MT(uc_trait)
+  
+  if (cenario %in% c("AP", "AE", "FF", "FM")) {
+    
+    candidatos$Y <- candidatos[[paste0("UC_", cenario)]]
+    
+    candidatos <- candidatos %>%
+      dplyr::arrange(dplyr::desc(Y)) %>%
+      dplyr::slice_head(n = n_cruzamentos)
+  }
+  
+  if (cenario == "MT") {
+    
+    candidatos$Y <- candidatos$UC_MT
+    
+    candidatos <- candidatos %>%
+      dplyr::arrange(dplyr::desc(Y)) %>%
+      dplyr::slice_head(n = n_cruzamentos)
+  }
+  
+  if (cenario == "Culling") {
+    
+    candidatos <- selecionar_cruzamentos_culling(
+      candidatos = candidatos,
+      n_cruzamentos = n_cruzamentos
+    )
+    
+    candidatos$Y <- candidatos$UC_MT
+  }
   
   candidatos$K <- NA_real_
   
   candidatos <- candidatos %>%
-    dplyr::arrange(dplyr::desc(Y)) %>%
-    dplyr::slice_head(n = n_cruzamentos) %>%
     dplyr::mutate(
       cruzamento_id = paste(Parent1, Parent2, sep = "_")
     ) %>%
@@ -405,7 +558,12 @@ calcular_uc_cruzamentos <- function(
       Parent2,
       Y,
       K,
-      cruzamento_id
+      cruzamento_id,
+      UC_AP,
+      UC_AE,
+      UC_FF,
+      UC_FM,
+      UC_MT
     )
   
   return(candidatos)
@@ -424,24 +582,26 @@ juntar_populacoes <- function(pop1, pop2) {
 }
 
 # ============================================================
-# 7. Objetos para guardar resultados
+# 8. Objetos para guardar resultados
 # ============================================================
 
 resultados_ciclos <- list()
 resultados_elites <- list()
 resultados_cruzamentos <- list()
 resultados_pool <- list()
+resultados_genotipos_elites <- list()
 
 contador_ciclos <- 1
 contador_elites <- 1
 contador_cruzamentos <- 1
 contador_pool <- 1
+contador_genotipos_elites <- 1
 
 # ============================================================
-# 8. Loop principal da simulação
+# 9. Loop principal da simulação
 # ============================================================
 
-cat("\nIniciando simulação recorrente...\n")
+cat("\nIniciando simulação recorrente v2...\n")
 
 for (cenario in cenarios) {
   
@@ -471,7 +631,7 @@ for (cenario in cenarios) {
       cat("\nCiclo", ciclo, "| Cenário", cenario, "| Repetição", rep_i, "\n")
       
       # --------------------------------------------------------
-      # 8.1 Definir cruzamentos do ciclo
+      # 9.1 Definir cruzamentos do ciclo
       # --------------------------------------------------------
       
       if (ciclo == 1) {
@@ -484,7 +644,8 @@ for (cenario in cenarios) {
             Parent2,
             Y,
             K,
-            cruzamento_id
+            cruzamento_id,
+            dplyr::any_of(c("UC_AP", "UC_AE", "UC_FF", "UC_FM", "UC_MT"))
           )
         
         metodo_cruzamento <- "SimpleMating_inicial"
@@ -512,7 +673,7 @@ for (cenario in cenarios) {
       contador_cruzamentos <- contador_cruzamentos + 1
       
       # --------------------------------------------------------
-      # 8.2 Fazer cruzamentos no AlphaSimR
+      # 9.2 Fazer cruzamentos no AlphaSimR
       # --------------------------------------------------------
       
       ids_pop <- pop_trabalho@id
@@ -566,7 +727,7 @@ for (cenario in cenarios) {
       )
       
       # --------------------------------------------------------
-      # 8.3 Avaliação TC1
+      # 9.3 Avaliação TC1
       # --------------------------------------------------------
       
       avaliacao_TC1 <- avaliar_estagio(
@@ -592,7 +753,7 @@ for (cenario in cenarios) {
       cross_ids_TC1 <- selecionados_TC1$Cross_ID
       
       # --------------------------------------------------------
-      # 8.4 Avaliação TC2
+      # 9.4 Avaliação TC2
       # --------------------------------------------------------
       
       avaliacao_TC2 <- avaliar_estagio(
@@ -618,7 +779,7 @@ for (cenario in cenarios) {
       cross_ids_TC2 <- selecionados_TC2$Cross_ID
       
       # --------------------------------------------------------
-      # 8.5 Avaliação TC3
+      # 9.5 Avaliação TC3
       # --------------------------------------------------------
       
       avaliacao_TC3 <- avaliar_estagio(
@@ -636,7 +797,7 @@ for (cenario in cenarios) {
       selecionados_TC3 <- avaliacao_TC3$selecionados
       
       # --------------------------------------------------------
-      # 8.6 Selecionar elites
+      # 9.6 Selecionar elites
       # --------------------------------------------------------
       
       elites_ciclo <- selecionar_por_cenario(
@@ -670,6 +831,9 @@ for (cenario in cenarios) {
         genotipos_elite
       )
       
+      resultados_genotipos_elites[[contador_genotipos_elites]] <- genotipos_elite
+      contador_genotipos_elites <- contador_genotipos_elites + 1
+      
       indices_elite_pop <- match(
         elite_ids_antigos,
         pop_DH@id
@@ -693,7 +857,7 @@ for (cenario in cenarios) {
       contador_elites <- contador_elites + 1
       
       # --------------------------------------------------------
-      # 8.7 Substituir piores parentais do pool
+      # 9.7 Substituir piores parentais do pool
       # --------------------------------------------------------
       
       gv_parentais <- as.matrix(
@@ -733,7 +897,7 @@ for (cenario in cenarios) {
       }
       
       # --------------------------------------------------------
-      # 8.8 Guardar resumo do ciclo
+      # 9.8 Guardar resumo do ciclo
       # --------------------------------------------------------
       
       gv_elites <- as.matrix(
@@ -805,7 +969,7 @@ for (cenario in cenarios) {
 }
 
 # ============================================================
-# 9. Consolidar resultados
+# 10. Consolidar resultados
 # ============================================================
 
 cat("\nConsolidando resultados...\n")
@@ -815,11 +979,50 @@ tabela_elites <- dplyr::bind_rows(resultados_elites)
 tabela_cruzamentos <- dplyr::bind_rows(resultados_cruzamentos)
 tabela_pool <- dplyr::bind_rows(resultados_pool)
 
+matriz_genotipos_elites <- do.call(
+  rbind,
+  resultados_genotipos_elites
+)
+
 # ============================================================
-# 10. Salvar somente objeto final
+# 11. Conferências finais
 # ============================================================
 
-resultados_simulacao <- list(
+cat("\nDimensões finais:\n")
+cat("tabela_ciclos:", dim(tabela_ciclos), "\n")
+cat("tabela_elites:", dim(tabela_elites), "\n")
+cat("tabela_cruzamentos:", dim(tabela_cruzamentos), "\n")
+cat("tabela_pool:", dim(tabela_pool), "\n")
+cat("matriz_genotipos_elites:", dim(matriz_genotipos_elites), "\n")
+
+cat("\nCiclos por cenário:\n")
+print(table(tabela_ciclos$Cenario, tabela_ciclos$Ciclo))
+
+cat("\nRepetições por cenário:\n")
+print(table(tabela_ciclos$Cenario, tabela_ciclos$Rep))
+
+valores_elites <- sort(unique(as.vector(matriz_genotipos_elites)))
+
+cat("\nValores encontrados nos genótipos dos elites:\n")
+print(valores_elites)
+
+if (!all(valores_elites %in% c(0, 2))) {
+  stop("Os genótipos dos elites possuem valores diferentes de 0 e 2.")
+}
+
+if (nrow(tabela_ciclos) != length(cenarios) * n_rep * n_cycles) {
+  stop("Número inesperado de linhas em tabela_ciclos.")
+}
+
+if (nrow(tabela_elites) != length(cenarios) * n_rep * n_cycles * n_elite) {
+  stop("Número inesperado de linhas em tabela_elites.")
+}
+
+# ============================================================
+# 12. Salvar objeto final
+# ============================================================
+
+resultados_simulacao_v2 <- list(
   
   parametros = list(
     n_rep = n_rep,
@@ -835,7 +1038,10 @@ resultados_simulacao <- list(
     i_uc = i_uc,
     max_candidatos_uc = max_candidatos_uc,
     h2_traits = h2_traits,
-    fator_h2_estagio = fator_h2_estagio
+    fator_h2_estagio = fator_h2_estagio,
+    media_base_indice = media_base_indice,
+    sd_base_indice = sd_base_indice,
+    base_indice_MT = "Grupo B inicial"
   ),
   
   tabela_ciclos = tabela_ciclos,
@@ -846,15 +1052,35 @@ resultados_simulacao <- list(
   
   tabela_pool = tabela_pool,
   
+  matriz_genotipos_elites = matriz_genotipos_elites,
+  
   testadores = testadores,
   
   parentais_grupo_B_inicial = parentais_grupo_B,
   
-  observacao = "Simulacao recorrente com dados reais. Ciclo 1 usa cruzamentos SimpleMating B x B. Ciclos seguintes usam criterio analogico ao usefulness criterion. Maior score = melhor; efeitos ja orientados para reducao."
+  observacao = "Simulacao recorrente v2 com dados reais. MT e Culling usam indice com padronizacao fixa baseada no Grupo B inicial. Genotipos dos elites foram salvos para analise de diversidade. Maior score = melhor; efeitos ja orientados para reducao."
 )
 
 saveRDS(
-  resultados_simulacao,
-  "resultados_simulacao_recorrente_alphasimr.rds"
+  resultados_simulacao_v2,
+  "resultados_simulacao_recorrente_alphasimr_v2.rds"
 )
 
+# ============================================================
+# 13. Mensagem final
+# ============================================================
+
+cat("\n============================================================\n")
+cat("SCRIPT 04 v2 CONCLUÍDO COM SUCESSO\n")
+cat("============================================================\n")
+
+cat("\nArquivo salvo:\n")
+cat("- resultados_simulacao_recorrente_alphasimr_v2.rds\n")
+
+cat("\nResumo:\n")
+cat("Cenários:", paste(cenarios, collapse = ", "), "\n")
+cat("Repetições:", n_rep, "\n")
+cat("Ciclos:", n_cycles, "\n")
+cat("Elites salvos:", nrow(matriz_genotipos_elites), "\n")
+
+cat("\nEsse RDS está pronto para os scripts de resultado:\n")
