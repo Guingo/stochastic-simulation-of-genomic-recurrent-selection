@@ -1,0 +1,399 @@
+library(dplyr)
+library(EasyMareyMap)
+# ============================================================
+# 1. Carregar dados
+# ============================================================
+
+Matriz_dos_Marker <- readRDS(
+  "C:/DadosR/Dados Milho Tropical/Dados_Milho/Matriz_dos_Marcadores_350.rds"
+)
+
+GenMap <- read.table(
+  "C:/DadosR/Dados Milho Tropical/Marcos/map_painel360.txt",
+  header = TRUE
+)
+
+map_ref <- read.table(
+  "C:/DadosR/Dados Milho Tropical/Marcos/ogut_2015_rmap_v2_to_v4_EXTENDED.txt",
+  header = TRUE,
+  sep = "\t"
+)
+
+# ============================================================
+# 2. Validação dos SNPs
+# ============================================================
+
+stopifnot(
+  nrow(GenMap) == 13826,
+  ncol(Matriz_dos_Marker) == 13826,
+  identical(
+    GenMap$marker,
+    colnames(Matriz_dos_Marker)
+  ),
+  !anyDuplicated(GenMap$marker)
+)
+
+cat("\nOK: 13.826 SNPs corretamente alinhados.\n")
+
+# ============================================================
+# 3. Reposicionar cada cromossomo para iniciar em 0 cM
+#
+# Isso apenas translada a escala.
+# As distâncias genéticas são preservadas.
+# ============================================================
+
+map_ref2 <- map_ref %>%
+  arrange(chr, pos_bp) %>%
+  group_by(chr) %>%
+  mutate(
+    pos_cM_zero = pos_cM - min(pos_cM)
+  ) %>%
+  ungroup()
+
+# ============================================================
+# 4. Formato requerido pelo EasyMareyMap
+# ============================================================
+
+EMM_input <- map_ref2 %>%
+  transmute(
+    set  = "Ogut_2015_B73v4",
+    map  = factor(chr),
+    mkr  = marker,
+    phys = as.numeric(pos_bp),
+    gen  = as.numeric(pos_cM_zero),
+    vld  = TRUE
+  )
+
+# ============================================================
+# 5. Objeto dos 13.826 SNPs
+# ============================================================
+
+GenMap_EMM <- GenMap %>%
+  mutate(
+    pos_bp = as.numeric(pos),
+    pos_cM_EMM = NA_real_
+  )
+
+# ============================================================
+# 6. Objetos para guardar modelos e parâmetros
+# ============================================================
+
+modelos_EMM <- vector("list", 10)
+
+names(modelos_EMM) <- as.character(1:10)
+
+span_EMM <- data.frame(
+  chr = 1:10,
+  span = NA_real_
+)
+
+# ============================================================
+# 7. Ajustar os 10 cromossomos
+# ============================================================
+
+set.seed(123)
+
+for (k in 1:10) {
+
+  cat(
+    "\n============================================\n",
+    "CROMOSSOMO ", k, "\n",
+    "============================================\n",
+    sep = ""
+  )
+
+  # ----------------------------------------------------------
+  # Referência do cromossomo
+  # ----------------------------------------------------------
+
+  ref_chr <- EMM_input %>%
+    filter(as.character(map) == as.character(k)) %>%
+    arrange(phys)
+
+  cat(
+    "Marcadores de referência:",
+    nrow(ref_chr),
+    "\n"
+  )
+
+  # ----------------------------------------------------------
+  # Verificar se todos os SNPs do painel estão dentro
+  # da região física coberta pela referência
+  # ----------------------------------------------------------
+
+  pos_target <- GenMap_EMM$pos_bp[
+    GenMap_EMM$chr == k
+  ]
+
+  dentro_ref <-
+    min(pos_target) >= min(ref_chr$phys) &&
+    max(pos_target) <= max(ref_chr$phys)
+
+  cat(
+    "SNPs dentro da referência:",
+    dentro_ref,
+    "\n"
+  )
+
+  if (!dentro_ref) {
+    stop(
+      paste(
+        "Cromossomo",
+        k,
+        "possui SNPs fora da região de referência."
+      )
+    )
+  }
+
+  # ----------------------------------------------------------
+  # Calibrar span
+  #
+  # IMPORTANTE:
+  # degree = 1
+  # ----------------------------------------------------------
+
+  cat("Calibrando smoothing...\n")
+
+  span_k <- EasyMareyMap::calibrate_smoothing(
+    x = ref_chr,
+    method = "loess",
+    n_resampling = 1000,
+    K = 5,
+    from = 0.20,
+    to = 0.50,
+    n_cores = 1,
+    degree = 1,
+    verbose = TRUE
+  )
+
+  span_EMM$span[span_EMM$chr == k] <- span_k
+
+  cat(
+    "\nSpan selecionado:",
+    span_k,
+    "\n"
+  )
+
+  # ----------------------------------------------------------
+  # Ajustar LOESS
+  # ----------------------------------------------------------
+
+  modelo_k <- EasyMareyMap::fit_loess(
+    x = ref_chr,
+    span = span_k,
+    degree = 1
+  )
+
+  modelos_EMM[[as.character(k)]] <- modelo_k
+
+  # ----------------------------------------------------------
+  # Predizer posição genética dos SNPs do painel
+  # ----------------------------------------------------------
+
+  idx <- GenMap_EMM$chr == k
+
+  pred_k <- predict(
+    modelo_k,
+    newdata = data.frame(
+      phys = GenMap_EMM$pos_bp[idx]
+    )
+  )
+
+  GenMap_EMM$pos_cM_EMM[idx] <-
+    as.numeric(pred_k)
+
+  cat(
+    "SNPs preditos:",
+    length(pred_k),
+    "\n"
+  )
+
+  cat(
+    "NAs:",
+    sum(is.na(pred_k)),
+    "\n"
+  )
+}
+
+# ============================================================
+# 8. Resumo e monotonicidade
+# ============================================================
+
+check_EMM <- GenMap_EMM %>%
+  arrange(chr, pos_bp) %>%
+  group_by(chr) %>%
+  summarise(
+
+    n_SNPs = n(),
+
+    min_Mb =
+      min(pos_bp) / 1e6,
+
+    max_Mb =
+      max(pos_bp) / 1e6,
+
+    min_cM =
+      min(pos_cM_EMM),
+
+    max_cM =
+      max(pos_cM_EMM),
+
+    span_cM =
+      max(pos_cM_EMM) -
+      min(pos_cM_EMM),
+
+    n_inversoes =
+      sum(diff(pos_cM_EMM) < 0),
+
+    menor_delta_cM =
+      min(diff(pos_cM_EMM)),
+
+    monotonic =
+      all(diff(pos_cM_EMM) >= 0),
+
+    .groups = "drop"
+  )
+
+cat(
+  "\n============================================\n",
+  "RESUMO DO MAPA EasyMareyMap\n",
+  "============================================\n",
+  sep = ""
+)
+
+print(
+  as.data.frame(check_EMM)
+)
+
+cat(
+  "\nSpans selecionados:\n"
+)
+
+print(span_EMM)
+
+# ============================================================
+# 9. VALIDAÇÃO GLOBAL
+# ============================================================
+
+if (any(is.na(GenMap_EMM$pos_cM_EMM))) {
+
+  stop(
+    "ERRO: existem posições genéticas NA."
+  )
+}
+
+if (any(!is.finite(GenMap_EMM$pos_cM_EMM))) {
+
+  stop(
+    "ERRO: existem posições genéticas não finitas."
+  )
+}
+
+if (any(check_EMM$n_inversoes > 0)) {
+
+  print(
+    check_EMM %>%
+      filter(n_inversoes > 0)
+  )
+
+  stop(
+    paste0(
+      "O mapa ainda apresenta inversões. ",
+      "NÃO será salvo como mapa final."
+    )
+  )
+}
+
+cat(
+  "\nOK: todos os 10 cromossomos são monotônicos.\n"
+)
+
+# ============================================================
+# 10. Converter cM -> Morgans
+# ============================================================
+
+GenMap_EMM <- GenMap_EMM %>%
+  mutate(
+    pos_M_EMM = pos_cM_EMM / 100
+  )
+
+# ============================================================
+# 11. Formato para AlphaSimR
+# ============================================================
+
+GenMap_AlphaSimR_EMM <- GenMap_EMM %>%
+  transmute(
+    markerName = marker,
+    chromosome = chr,
+    position = pos_M_EMM
+  )
+
+# Validar novamente
+stopifnot(
+  nrow(GenMap_AlphaSimR_EMM) == 13826,
+  identical(
+    GenMap_AlphaSimR_EMM$markerName,
+    colnames(Matriz_dos_Marker)
+  )
+)
+
+head(GenMap_AlphaSimR_EMM)
+
+dim(GenMap_AlphaSimR_EMM)
+
+comprimento_total_EMM <-
+  sum(check_EMM$span_cM)
+
+cat(
+  "\nComprimento genético total coberto pelos 13.826 SNPs:",
+  round(comprimento_total_EMM, 2),
+  "cM\n"
+)
+
+# ============================================================
+# 12. CONTROLE: interpolação linear anterior
+# ============================================================
+
+GenMap_EMM$pos_cM_linear <- NA_real_
+
+for (k in 1:10) {
+
+  ref_k <- map_ref2 %>%
+    filter(chr == k) %>%
+    arrange(pos_bp)
+
+  idx <- GenMap_EMM$chr == k
+
+  GenMap_EMM$pos_cM_linear[idx] <-
+    approx(
+      x = ref_k$pos_bp,
+      y = ref_k$pos_cM_zero,
+      xout = GenMap_EMM$pos_bp[idx],
+      method = "linear",
+      ties = "ordered"
+    )$y
+}
+
+# Correlação
+cor(
+  GenMap_EMM$pos_cM_EMM,
+  GenMap_EMM$pos_cM_linear
+)
+
+# RMSE
+sqrt(
+  mean(
+    (
+      GenMap_EMM$pos_cM_EMM -
+      GenMap_EMM$pos_cM_linear
+    )^2
+  )
+)
+
+# maior diferença absoluta
+max(
+  abs(
+    GenMap_EMM$pos_cM_EMM -
+    GenMap_EMM$pos_cM_linear
+  )
+)
