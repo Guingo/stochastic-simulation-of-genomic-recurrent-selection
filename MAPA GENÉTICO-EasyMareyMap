@@ -4,20 +4,11 @@ library(EasyMareyMap)
 # 1. Carregar dados
 # ============================================================
 
-Matriz_dos_Marker <- readRDS(
-  "C:/DadosR/Dados Milho Tropical/Dados_Milho/Matriz_dos_Marcadores_350.rds"
-)
+Matriz_dos_Marker <- readRDS( "C:/DadosR/Dados Milho Tropical/Dados_Milho/Matriz_dos_Marcadores_350.rds")
 
-GenMap <- read.table(
-  "C:/DadosR/Dados Milho Tropical/Marcos/map_painel360.txt",
-  header = TRUE
-)
+GenMap <- read.table("C:/DadosR/Dados Milho Tropical/Marcos/map_painel360.txt",header = TRUE)
 
-map_ref <- read.table(
-  "C:/DadosR/Dados Milho Tropical/Marcos/ogut_2015_rmap_v2_to_v4_EXTENDED.txt",
-  header = TRUE,
-  sep = "\t"
-)
+map_ref <- read.table("C:/DadosR/Dados Milho Tropical/Marcos/ogut_2015_rmap_v2_to_v4_EXTENDED.txt",header = TRUE, sep = "\t")
 
 # ============================================================
 # 2. Validação dos SNPs
@@ -26,20 +17,14 @@ map_ref <- read.table(
 stopifnot(
   nrow(GenMap) == 13826,
   ncol(Matriz_dos_Marker) == 13826,
-  identical(
-    GenMap$marker,
-    colnames(Matriz_dos_Marker)
+  identical(GenMap$marker, colnames(Matriz_dos_Marker)
   ),
   !anyDuplicated(GenMap$marker)
 )
-
 cat("\nOK: 13.826 SNPs corretamente alinhados.\n")
 
 # ============================================================
 # 3. Reposicionar cada cromossomo para iniciar em 0 cM
-#
-# Isso apenas translada a escala.
-# As distâncias genéticas são preservadas.
 # ============================================================
 
 map_ref2 <- map_ref %>%
@@ -53,7 +38,6 @@ map_ref2 <- map_ref %>%
 # ============================================================
 # 4. Formato requerido pelo EasyMareyMap
 # ============================================================
-
 EMM_input <- map_ref2 %>%
   transmute(
     set  = "Ogut_2015_B73v4",
@@ -77,22 +61,17 @@ GenMap_EMM <- GenMap %>%
 # ============================================================
 # 6. Objetos para guardar modelos e parâmetros
 # ============================================================
-
 modelos_EMM <- vector("list", 10)
-
 names(modelos_EMM) <- as.character(1:10)
-
 span_EMM <- data.frame(
   chr = 1:10,
   span = NA_real_
 )
-
 # ============================================================
 # 7. Ajustar os 10 cromossomos
 # ============================================================
 
 set.seed(123)
-
 for (k in 1:10) {
 
   cat(
@@ -120,8 +99,7 @@ for (k in 1:10) {
   # Verificar se todos os SNPs do painel estão dentro
   # da região física coberta pela referência
   # ----------------------------------------------------------
-
-  pos_target <- GenMap_EMM$pos_bp[
+pos_target <- GenMap_EMM$pos_bp[
     GenMap_EMM$chr == k
   ]
 
@@ -147,9 +125,6 @@ for (k in 1:10) {
 
   # ----------------------------------------------------------
   # Calibrar span
-  #
-  # IMPORTANTE:
-  # degree = 1
   # ----------------------------------------------------------
 
   cat("Calibrando smoothing...\n")
