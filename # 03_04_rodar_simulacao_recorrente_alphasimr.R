@@ -1,25 +1,5 @@
+
 # ============================================================
-# SCRIPT 04 v2
-# Rodar simulação de seleção recorrente com AlphaSimR
-#
-# Versão correta para resultado final do artigo
-#
-# Correções principais:
-
-# - n_cycles = 6
-# - MT e Culling usam índice multicaracteres com escala fixa
-#   baseada no Grupo B inicial
-# - Genótipos dos elites são salvos no RDS final
-# - Arquivo final salvo como:
-#   resultados_simulacao_recorrente_alphasimr_v2.rds
-#
-# Importante:
-# Maior score = melhor.
-# Os efeitos já estão orientados para redução.
-# Não inverter sinal.
-# ============================================================
-
-
 
 library(AlphaSimR)
 library(dplyr)
@@ -42,6 +22,15 @@ cenarios <- c(
   "Culling"
 )
 
+ordem_cenarios_original <- c(
+  "AP",
+  "AE",
+  "FF",
+  "FM",
+  "MT",
+  "Culling"
+)
+
 n_cruzamentos_por_ciclo <- 50
 n_DH_por_cruzamento <- 20
 
@@ -51,7 +40,6 @@ n_TC3 <- 100
 n_elite <- 2
 
 prop_sel_uc <- 0.05
-
 i_uc <- dnorm(qnorm(1 - prop_sel_uc)) / prop_sel_uc
 
 max_candidatos_uc <- 15000
@@ -69,6 +57,21 @@ fator_h2_estagio <- c(
   TC3 = 0.95
 )
 
+# ============================================================
+# 1.1. Proporções equivalentes do Culling por estágio
+# ============================================================
+
+prop_culling_estagio <- c(
+  TC1   = (n_TC1 / (n_cruzamentos_por_ciclo * n_DH_por_cruzamento))^(1/4),
+  TC2   = (n_TC2 / n_TC1)^(1/4),
+  TC3   = (n_TC3 / n_TC2)^(1/4),
+  Elite = (n_elite / n_TC3)^(1/4)
+)
+
+# Culling para seleção de cruzamentos nos ciclos 2 a 6.
+# Mantido como no script original, com filtros sequenciais de 70%.
+prop_culling_cruzamentos <- 0.70
+
 cat("\nParâmetros principais:\n")
 cat("Repetições:", n_rep, "\n")
 cat("Ciclos:", n_cycles, "\n")
@@ -76,8 +79,21 @@ cat("Cenários:", paste(cenarios, collapse = ", "), "\n")
 cat("Cruzamentos por ciclo:", n_cruzamentos_por_ciclo, "\n")
 cat("DHs por cruzamento:", n_DH_por_cruzamento, "\n")
 cat("DHs por ciclo:", n_cruzamentos_por_ciclo * n_DH_por_cruzamento, "\n")
+cat("TC1:", n_TC1, "\n")
+cat("TC2:", n_TC2, "\n")
+cat("TC3:", n_TC3, "\n")
 cat("Elites por ciclo:", n_elite, "\n")
 cat("Intensidade UC:", i_uc, "\n")
+
+cat("\nProporções equivalentes do Culling por estágio:\n")
+print(prop_culling_estagio)
+
+cat("\nInterpretação:\n")
+cat("TC1:   manter", round(prop_culling_estagio["TC1"] * 100, 2), "% em cada filtro\n")
+cat("TC2:   manter", round(prop_culling_estagio["TC2"] * 100, 2), "% em cada filtro\n")
+cat("TC3:   manter", round(prop_culling_estagio["TC3"] * 100, 2), "% em cada filtro\n")
+cat("Elite: manter", round(prop_culling_estagio["Elite"] * 100, 2), "% em cada filtro\n")
+cat("Culling de cruzamentos:", prop_culling_cruzamentos * 100, "% por filtro\n")
 
 # ============================================================
 # 2. Carregar entradas
@@ -299,7 +315,12 @@ adicionar_erro <- function(gv, h2_estagio) {
   return(pheno)
 }
 
-selecionar_por_cenario <- function(df, n_sel, cenario) {
+selecionar_por_cenario <- function(
+    df,
+    n_sel,
+    cenario,
+    estagio = NULL
+) {
   
   if (cenario %in% c("AP", "AE", "FF", "FM", "MT")) {
     
@@ -312,9 +333,19 @@ selecionar_por_cenario <- function(df, n_sel, cenario) {
   
   if (cenario == "Culling") {
     
-    n1 <- max(n_sel, ceiling(nrow(df) * 0.70))
-    n2 <- max(n_sel, ceiling(n1 * 0.70))
-    n3 <- max(n_sel, ceiling(n2 * 0.70))
+    if (is.null(estagio)) {
+      stop("Para Culling, o estágio precisa ser informado.")
+    }
+    
+    prop_usada <- prop_culling_estagio[estagio]
+    
+    if (is.na(prop_usada)) {
+      stop(paste("Proporção de Culling não encontrada para o estágio:", estagio))
+    }
+    
+    n1 <- max(n_sel, ceiling(nrow(df) * prop_usada))
+    n2 <- max(n_sel, ceiling(n1 * prop_usada))
+    n3 <- max(n_sel, ceiling(n2 * prop_usada))
     
     df_sel <- df %>%
       dplyr::arrange(dplyr::desc(AP)) %>%
@@ -325,6 +356,9 @@ selecionar_por_cenario <- function(df, n_sel, cenario) {
       dplyr::slice_head(n = n3) %>%
       dplyr::arrange(dplyr::desc(FM)) %>%
       dplyr::slice_head(n = n_sel)
+    
+    df_sel$Prop_culling_estagio <- as.numeric(prop_usada)
+    df_sel$Estagio_culling <- estagio
     
     return(df_sel)
   }
@@ -388,7 +422,6 @@ avaliar_estagio <- function(
   )
   
   h2_estagio <- h2_traits * fator_h2_estagio[estagio]
-  
   h2_estagio[h2_estagio >= 0.99] <- 0.99
   
   pheno <- adicionar_erro(
@@ -419,7 +452,8 @@ avaliar_estagio <- function(
   df_sel <- selecionar_por_cenario(
     df = df,
     n_sel = n_sel,
-    cenario = cenario
+    cenario = cenario,
+    estagio = estagio
   )
   
   return(list(
@@ -431,9 +465,9 @@ avaliar_estagio <- function(
 
 selecionar_cruzamentos_culling <- function(candidatos, n_cruzamentos) {
   
-  n1 <- max(n_cruzamentos, ceiling(nrow(candidatos) * 0.70))
-  n2 <- max(n_cruzamentos, ceiling(n1 * 0.70))
-  n3 <- max(n_cruzamentos, ceiling(n2 * 0.70))
+  n1 <- max(n_cruzamentos, ceiling(nrow(candidatos) * prop_culling_cruzamentos))
+  n2 <- max(n_cruzamentos, ceiling(n1 * prop_culling_cruzamentos))
+  n3 <- max(n_cruzamentos, ceiling(n2 * prop_culling_cruzamentos))
   
   candidatos_sel <- candidatos %>%
     dplyr::arrange(dplyr::desc(UC_AP)) %>%
@@ -601,7 +635,7 @@ contador_genotipos_elites <- 1
 # 9. Loop principal da simulação
 # ============================================================
 
-cat("\nIniciando simulação recorrente v2...\n")
+cat("\nIniciando simulação recorrente v3 com Culling equivalente ao funil...\n")
 
 for (cenario in cenarios) {
   
@@ -615,11 +649,15 @@ for (cenario in cenarios) {
     stop(paste("Não há cruzamentos iniciais para o cenário", cenario))
   }
   
+  cruzamentos_iniciais_cenario$Cenario_original <- cruzamentos_iniciais_cenario$Cenario
+  
   for (rep_i in seq_len(n_rep)) {
     
     cat("\n--- Repetição", rep_i, "de", n_rep, "| Cenário", cenario, "---\n")
     
-    set.seed(1000 + rep_i + which(cenarios == cenario) * 100)
+    set.seed(
+      1000 + rep_i + match(cenario, ordem_cenarios_original) * 100
+    )
     
     pop_trabalho <- pop_base
     matriz_pool <- matriz_marcadores
@@ -645,10 +683,19 @@ for (cenario in cenarios) {
             Y,
             K,
             cruzamento_id,
-            dplyr::any_of(c("UC_AP", "UC_AE", "UC_FF", "UC_FM", "UC_MT"))
+            dplyr::any_of(
+              c(
+                "Cenario_original",
+                "UC_AP",
+                "UC_AE",
+                "UC_FF",
+                "UC_FM",
+                "UC_MT"
+              )
+            )
           )
         
-        metodo_cruzamento <- "SimpleMating_inicial"
+        metodo_cruzamento <- "SimpleMating_inicial_proprio_cenario"
         
       } else {
         
@@ -661,7 +708,7 @@ for (cenario in cenarios) {
           max_candidatos = max_candidatos_uc
         )
         
-        metodo_cruzamento <- "UC_analogico"
+        metodo_cruzamento <- "UC_analogico_proprio_cenario"
       }
       
       cruzamentos_ciclo$Cenario <- cenario
@@ -803,7 +850,8 @@ for (cenario in cenarios) {
       elites_ciclo <- selecionar_por_cenario(
         df = selecionados_TC3,
         n_sel = n_elite,
-        cenario = cenario
+        cenario = cenario,
+        estagio = "Elite"
       )
       
       elite_ids_antigos <- elites_ciclo$ID
@@ -927,8 +975,35 @@ for (cenario in cenarios) {
         Rep = rep_i,
         Ciclo = ciclo,
         Metodo_cruzamento = metodo_cruzamento,
+        Tipo_culling = ifelse(
+          cenario == "Culling",
+          "equivalente_ao_funil_individuos",
+          "nao_aplicavel"
+        ),
+        Prop_culling_TC1 = ifelse(
+          cenario == "Culling",
+          prop_culling_estagio["TC1"],
+          NA
+        ),
+        Prop_culling_TC2 = ifelse(
+          cenario == "Culling",
+          prop_culling_estagio["TC2"],
+          NA
+        ),
+        Prop_culling_TC3 = ifelse(
+          cenario == "Culling",
+          prop_culling_estagio["TC3"],
+          NA
+        ),
+        Prop_culling_Elite = ifelse(
+          cenario == "Culling",
+          prop_culling_estagio["Elite"],
+          NA
+        ),
         n_parentais_pool = length(parental_pool_ids),
         n_cruzamentos = nrow(cruzamentos_ciclo),
+        Media_Y_cruzamentos = mean(cruzamentos_ciclo$Y, na.rm = TRUE),
+        Melhor_Y_cruzamento = max(cruzamentos_ciclo$Y, na.rm = TRUE),
         n_DH = nrow(genotipos_DH),
         n_TC1 = nrow(selecionados_TC1),
         n_TC2 = nrow(selecionados_TC2),
@@ -1022,7 +1097,7 @@ if (nrow(tabela_elites) != length(cenarios) * n_rep * n_cycles * n_elite) {
 # 12. Salvar objeto final
 # ============================================================
 
-resultados_simulacao_v2 <- list(
+resultados_simulacao_v3 <- list(
   
   parametros = list(
     n_rep = n_rep,
@@ -1041,46 +1116,81 @@ resultados_simulacao_v2 <- list(
     fator_h2_estagio = fator_h2_estagio,
     media_base_indice = media_base_indice,
     sd_base_indice = sd_base_indice,
-    base_indice_MT = "Grupo B inicial"
+    base_indice_MT = "Grupo B inicial",
+    prop_culling_estagio = prop_culling_estagio,
+    prop_culling_cruzamentos = prop_culling_cruzamentos,
+    pesos_MT = c(AP = 0.25, AE = 0.25, FF = 0.25, FM = 0.25),
+    criterio_MT = "indice multicaracteres com pesos iguais apos padronizacao pelo Grupo B inicial",
+    criterio_Culling_individuos = "filtros sequenciais AP_AE_FF_FM com proporcao equivalente ao funil por estagio",
+    criterio_Culling_cruzamentos = "filtros sequenciais sobre UC_AP_UC_AE_UC_FF_UC_FM com proporcao fixa de 0.70",
+    criterio_cruzamentos_ciclos_2_6 = "UC conforme o cenario",
+    avaliacao_ganho = "media dos scores geneticos dos elites e do pool por ciclo"
   ),
   
   tabela_ciclos = tabela_ciclos,
-  
   tabela_elites = tabela_elites,
-  
   tabela_cruzamentos = tabela_cruzamentos,
-  
   tabela_pool = tabela_pool,
-  
   matriz_genotipos_elites = matriz_genotipos_elites,
-  
   testadores = testadores,
-  
   parentais_grupo_B_inicial = parentais_grupo_B,
   
-  observacao = "Simulacao recorrente v2 com dados reais. MT e Culling usam indice com padronizacao fixa baseada no Grupo B inicial. Genotipos dos elites foram salvos para analise de diversidade. Maior score = melhor; efeitos ja orientados para reducao."
+  observacao = paste0(
+    "Simulacao recorrente v3 com dados reais. ",
+    "Todos os cenarios foram avaliados em seis ciclos e dez repeticoes. ",
+    "MT usa indice multicaracteres com pesos iguais e padronizacao fixa baseada no Grupo B inicial. ",
+    "No Culling, a selecao de individuos usa filtros sequenciais AP-AE-FF-FM com proporcao equivalente ao funil por estagio. ",
+    "Nos ciclos 2 a 6, a selecao de cruzamentos continua baseada em UC conforme o cenario. ",
+    "Para cruzamentos no Culling, foram mantidos filtros sequenciais sobre UC_AP, UC_AE, UC_FF e UC_FM com proporcao 0.70. ",
+    "Genotipos dos elites foram salvos para analise de diversidade. ",
+    "Maior score = melhor; efeitos ja orientados para reducao."
+  )
 )
 
 saveRDS(
-  resultados_simulacao_v2,
-  "resultados_simulacao_recorrente_alphasimr_v2.rds"
+  resultados_simulacao_v3,
+  "resultados_simulacao_recorrente_alphasimr_v3_culling_funil.rds"
 )
 
 # ============================================================
-# 13. Mensagem final
+# 13. Diagnóstico rápido
+# ============================================================
+
+diagnostico_v3 <- tabela_ciclos %>%
+  dplyr::group_by(Cenario, Ciclo) %>%
+  dplyr::summarise(
+    n_rep = dplyr::n_distinct(Rep),
+    Media_score_elites = mean(Media_score_elites, na.rm = TRUE),
+    SE_media_score_elites = sd(Media_score_elites, na.rm = TRUE) / sqrt(n_rep),
+    Media_score_pool = mean(Media_score_pool, na.rm = TRUE),
+    Media_Y_cruzamentos = mean(Media_Y_cruzamentos, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("\nDiagnóstico por ciclo:\n")
+print(diagnostico_v3)
+
+write.csv(
+  diagnostico_v3,
+  "diagnostico_simulacao_recorrente_v3_culling_funil.csv",
+  row.names = FALSE
+)
+
+# ============================================================
+# 14. Mensagem final
 # ============================================================
 
 cat("\n============================================================\n")
-cat("SCRIPT 04 v2 CONCLUÍDO COM SUCESSO\n")
+cat("SCRIPT 04 v3 CONCLUÍDO COM SUCESSO\n")
 cat("============================================================\n")
 
-cat("\nArquivo salvo:\n")
-cat("- resultados_simulacao_recorrente_alphasimr_v2.rds\n")
+cat("\nArquivos salvos:\n")
+cat("- resultados_simulacao_recorrente_alphasimr_v3_culling_funil.rds\n")
+cat("- diagnostico_simulacao_recorrente_v3_culling_funil.csv\n")
 
 cat("\nResumo:\n")
 cat("Cenários:", paste(cenarios, collapse = ", "), "\n")
 cat("Repetições:", n_rep, "\n")
 cat("Ciclos:", n_cycles, "\n")
 cat("Elites salvos:", nrow(matriz_genotipos_elites), "\n")
-
-cat("\nEsse RDS está pronto para os scripts de resultado:\n")
+cat("\nEsse RDS está pronto para os scripts de resultado.\n")
